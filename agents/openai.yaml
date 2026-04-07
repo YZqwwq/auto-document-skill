@@ -1,0 +1,4 @@
+interface:
+  display_name: "自动文档"
+  short_description: "构建并维护分层项目文档"
+  default_prompt: "使用 $auto-document 初始化项目文档，从整体到细节分析当前仓库，并在代码变更后保持受影响文档同步更新。"
