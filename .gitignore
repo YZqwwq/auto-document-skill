@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+.tmp-*/
+.tmp-smoke/
+
+.pytest_cache/
