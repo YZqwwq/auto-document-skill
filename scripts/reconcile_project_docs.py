@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from architecture_domains import infer_architecture_domains, recommended_domain_ids, tracked_top_level_paths
-from create_module_doc import detect_project_traits, normalize_doc_root, render_domain_doc, update_modules_readme
+from create_module_doc import (
+    detect_project_traits,
+    normalize_doc_root,
+    render_domain_doc,
+    update_modules_readme,
+)
 from git_tracking import capture_git_snapshot, merge_git_state
 from scan_project_tree import build_tree, load_index, summarize_top_level, write_structure_doc
 
@@ -351,94 +356,41 @@ def remove_empty_module_directories(doc_root: Path) -> list[str]:
 
 
 def write_root_readme(doc_root: Path, domains: list[dict], module_docs: dict) -> None:
-    level_one_domains = [domain for domain in domains if domain.get("level") == 1]
-    grouped: dict[str | None, list[dict]] = {}
-    for domain in domains:
-        grouped.setdefault(domain.get("parent_id"), []).append(domain)
-
-    def extract_project_positioning() -> str:
-        summary_path = doc_root / "overview" / "project-summary.md"
-        if not summary_path.exists():
-            return "待补充：用 1 到 3 句话说明这个项目当前在做什么、主要面向谁、为什么需要继续维护这些功能域文档。"
-        text = summary_path.read_text(encoding="utf-8")
-        marker = "## 项目定位"
-        if marker not in text:
-            return "待补充：用 1 到 3 句话说明这个项目当前在做什么、主要面向谁、为什么需要继续维护这些功能域文档。"
-        section = text.split(marker, 1)[1].strip().splitlines()
-        lines = [line.strip() for line in section if line.strip()]
-        if not lines:
-            return "待补充：用 1 到 3 句话说明这个项目当前在做什么、主要面向谁、为什么需要继续维护这些功能域文档。"
-        candidate = lines[0]
-        if candidate.startswith("待补充"):
-            return "待补充：用 1 到 3 句话说明这个项目当前在做什么、主要面向谁、为什么需要继续维护这些功能域文档。"
-        return candidate
-
-    question_routes = [
-        "- 想先知道这个项目当前在做什么：读 `overview/project-summary.md`",
-        "- 想先按功能架构进入：读 `modules/README.md`",
-        "- 想快速扫大量路径和目录关系：再读 `overview/project-structure.md`",
-    ]
-    for domain in level_one_domains:
-        doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
-        target = doc_rel.replace("\\", "/") if doc_rel else ""
-        question_routes.append(f"- 想先理解 `{domain['title']}`：进入 `{target}`")
-
-    domain_list = []
-    for domain in level_one_domains:
-        doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
-        target = doc_rel.replace("\\", "/") if doc_rel else ""
-        domain_list.append(f"- `{domain['title']}`：{domain['summary']} 详见 `{target}`")
-
-    second_layer_list = []
-    for parent in level_one_domains:
-        children = grouped.get(parent["id"], [])
-        if not children:
-            continue
-        second_layer_list.append(f"### {parent['title']}")
-        second_layer_list.append("")
-        for child in children:
-            doc_rel = module_docs.get(child["id"], child.get("doc_path", ""))
-            target = doc_rel.replace("\\", "/") if doc_rel else ""
-            second_layer_list.append(f"- `{child['title']}`：{child['summary']} 详见 `{target}`")
-        second_layer_list.append("")
+    project_name = doc_root.parent.name or "当前项目"
 
     content = f"""# 项目文档
 
-这个目录存放由 `auto-document` skill 维护的分层项目文档，用于帮助人和 AI 按“功能架构”而不是“目录树本身”理解项目当前状态。
+这份目录用于维护 `{project_name}` 的项目文档系统。这里不负责展开具体功能架构，而是说明这套文档目录里各个固定文件和文件夹分别做什么，帮助维护者快速判断应该去哪里阅读、补充或更新。
 
-## 项目当前在做什么
+## 建议先读哪里
 
-{extract_project_positioning()}
+- 第一次接手时，先读 `overview` 下的 `project-summary.md`，再读 `modules` 下的 `README.md`。
+- 如果需要快速扫目录和路径关系，再读 `overview` 下的 `project-structure.md`。
+- 如果要判断最近一次分析、变更规划和待处理项，再读 `history` 和 `index.json`。
 
-## 这份目录怎么用
+## 固定文件与文件夹的作用
 
-- 先读 `overview/project-summary.md`，理解项目目标、架构理念和阅读方式
-- 再用 `modules/README.md` 确认第一层功能域与第二层专题域
-- 如果问题已经落到具体专题，直接进入对应专题文档，不要停留在根目录索引
+```text
+overview
+|-- project-structure.md  项目的文件层次，用于引导 AI 快速建立路径地图；项目开发者通常可以按需查看
+|-- project-summary.md    对项目目的与设计理念的阐述；AI 会先生成模板，但仍需要开发者维护和补充，用来给后续 AI 工作一个明确方向
 
-## 按问题找文档
+modules
+|-- README.md             功能域总入口，用来判断应该先从哪个功能域进入
 
-{chr(10).join(question_routes)}
-- 想知道文档系统当前对齐到了什么状态：看 `index.json`
+history
+|-- analysis-log.md       记录每一轮分析、收敛或人工补充
+|-- change-log.md         记录由代码变更触发的文档更新规划和影响范围
 
-## 当前第一层功能域
-
-{chr(10).join(domain_list) if domain_list else "- 尚未登记第一层功能域"}
-
-## 当前第二层专题域
-
-{chr(10).join(second_layer_list).strip() if second_layer_list else "- 尚未登记第二层专题域"}
+index.json                文档系统的机器可读控制面，记录已生成文档、功能域索引、待处理更新项和 git 对齐状态
+```
 
 ## 文档职责
 
-- `index.json`
-  供后续运行使用的机器可读状态
-- `overview/`
-  项目摘要与 AI 结构快照
-- `modules/`
-  第一层功能域与第二层专题域文档
-- `history/`
-  分析与更新轨迹
+- `overview` 负责项目级理解。
+- `modules` 负责功能域级理解。
+- `history` 负责维护轨迹。
+- `index.json` 负责机器可读状态。
 """
     (doc_root / "README.md").write_text(content, encoding="utf-8")
 

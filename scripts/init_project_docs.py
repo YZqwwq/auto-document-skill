@@ -113,38 +113,39 @@ def main() -> int:
     (doc_root / "modules").mkdir(exist_ok=True)
     (doc_root / "history").mkdir(exist_ok=True)
 
-    readme = """# 项目文档
+    readme = f"""# 项目文档
 
-这个目录存放由 `auto-document` skill 维护的分层项目文档，用于帮助人和 AI 快速理解项目当前状态。
+这份目录用于维护 `{project_root.name}` 的项目文档系统。这里主要说明固定文件和文件夹各自承担什么职责，帮助维护者快速判断应该去哪里阅读、补充或更新。
 
-## 项目当前在做什么
+## 建议先读哪里
 
-待补充：用 1 到 3 句话说明这个项目当前在做什么、主要面向谁、为什么需要继续维护这些功能域文档。
+- 第一次接手时，先读 `overview` 下的 `project-summary.md`，再读 `modules` 下的 `README.md`
+- 如果需要快速扫目录和路径关系，再读 `overview` 下的 `project-structure.md`
+- 如果需要查看维护状态，再读 `history` 和 `index.json`
 
-## 这份目录怎么用
+## 固定文件与文件夹的作用
 
-- 先读 `overview/project-summary.md`，确认项目是什么
-- 再读 `overview/project-structure.md`，确认整体结构和阅读顺序
-- 再读 `modules/README.md`，按功能域继续下沉
-- 当你需要查看维护状态时，再读 `history/analysis-log.md` 和 `history/change-log.md`
+```text
+overview
+|-- project-structure.md  项目的文件层次，用于引导 AI 快速建立路径地图；项目开发者通常可以按需查看
+|-- project-summary.md    对项目目的与设计理念的阐述；AI 会先生成模板，但仍需要开发者维护和补充，用来给后续 AI 工作一个明确方向
 
-## 按问题找文档
+modules
+|-- README.md             功能域总入口，用来判断应该先从哪个功能域进入
 
-- 想先知道项目到底在解决什么：读 `overview/project-summary.md`
-- 想先知道仓库应该从哪里开始进入：读 `overview/project-structure.md`
-- 想先理解项目有哪些功能域：进入 `modules/README.md`
-- 想知道文档系统当前对齐到了什么状态：看 `index.json`
+history
+|-- analysis-log.md       记录每一轮分析、收敛或人工补充
+|-- change-log.md         记录由代码变化触发的文档更新规划和影响范围
+
+index.json                文档系统的机器可读控制面，记录已生成文档、功能域索引、待处理更新项和 git 对齐状态
+```
 
 ## 文档职责
 
-- `index.json`
-  供后续文档运行使用的机器可读状态
-- `overview/`
-  项目整体理解与结构导航
-- `modules/`
-  第二轮功能域与专题域文档
-- `history/`
-  分析与更新轨迹
+- `overview` 负责项目级理解
+- `modules` 负责功能域级理解
+- `history` 负责维护轨迹
+- `index.json` 负责机器可读状态
 """
 
     project_summary = """# 项目摘要
@@ -210,21 +211,23 @@ def main() -> int:
 
     modules_readme = """# 模块文档
 
-这个目录只负责两层事情：先解释项目有哪些第一层功能域，再解释每个功能域下有哪些第二层专题域。
+这里按当前项目的功能架构列出第一层功能域，以及已经单独拆出的第二层专题域。
 
 ## 这份文档怎么用
 
-- 先看第一层功能域，建立项目的大体功能分层
-- 再按问题进入对应的第二层专题域
-- 如果问题已经落到具体实现链，继续去专题域 README 或叶子文档，不要在这里停留
+- 先按第一层功能域判断问题落在哪一层
+- 如果已经拆出第二层专题域，再继续下钻到对应专题
+- 如果某个功能域还没有继续下钻，直接进入这一层 README 查看边界和入口
 
-## 当前模块文档
+## 当前功能架构
 
-_暂时为空。_
+- 待补充：运行结构扫描与收敛脚本后，这里会自动生成合并后的功能架构图。
 
-## 建议下一步
+## 继续下钻时的原则
 
-运行结构扫描与收敛脚本后，这里会自动登记功能域文档。
+- 这份索引只负责回答“先从哪一块进入”
+- 当问题已经落到具体实现链时，直接进入对应 README 或叶子文档
+- 如果结构说明和代码冲突，以代码为准，再回头更新文档
 """
 
     analysis_log = """# 分析日志

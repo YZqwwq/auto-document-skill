@@ -1588,90 +1588,90 @@ def render_domain_doc(domain: dict, all_domains: list[dict], project_root: Path)
 """
 
 
-def update_modules_readme(doc_root: Path, module_docs: dict, architecture_domains: list[dict] | None = None) -> None:
+def doc_link_path(doc_rel: str, *, from_modules_root: bool = False) -> str:
+    if not doc_rel:
+        return ""
+    normalized = Path(doc_rel)
+    if from_modules_root:
+        try:
+            return normalized.relative_to("modules").as_posix()
+        except ValueError:
+            return normalized.as_posix()
+    return normalized.as_posix()
+
+
+def linked_domain_title(domain: dict, doc_rel: str, *, from_modules_root: bool = False) -> str:
+    link_path = doc_link_path(doc_rel, from_modules_root=from_modules_root)
+    if not link_path:
+        return f"`{domain['title']}`"
+    return f"[`{domain['title']}`](./{link_path})"
+
+
+def render_domain_architecture_map(
+    module_docs: dict,
+    architecture_domains: list[dict] | None = None,
+    *,
+    from_modules_root: bool = False,
+) -> list[str]:
     architecture_domains = architecture_domains or []
     grouped = domains_by_parent(architecture_domains) if architecture_domains else {}
-    route_hints = {
-        "interaction-surface": "想先理解前端界面、桥接层和交互体验：读交互与展示层",
-        "backend-runtime": "想先理解主进程、服务和运行时控制面：读后端运行时层",
-        "ai-runtime": "想先理解 AI agent 主链和模型配置：读 AI 能力与代理主链",
-        "task-orchestration": "想先理解 task、queue 和子 Agent 调度：读任务与子 Agent 编排",
-        "logging-observability": "想先理解日志链路与观测面：读日志与可观测性",
-        "worldbuilding-domain": "想先理解世界观、角色或领域编辑：读世界观与角色编辑",
-        "shared-contracts": "想先理解跨层共享的数据结构和实体：读共享契约与实体",
-        "design-knowledge": "想先理解解释性知识库和阅读导航：读设计知识与说明文档",
-    }
     level_one_domains = grouped.get(None, [])
-    level_two_domains = [domain for root in level_one_domains for domain in grouped.get(root["id"], [])]
+    if not level_one_domains:
+        return ["- 当前还没有稳定的功能域，请先重新扫描并执行收敛。"]
+
+    lines = []
+    for domain in level_one_domains:
+        doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
+        lines.append(f"- {linked_domain_title(domain, doc_rel, from_modules_root=from_modules_root)}：{domain['summary']}")
+
+        children = grouped.get(domain["id"], [])
+        if children:
+            for index, child in enumerate(children):
+                child_doc_rel = module_docs.get(child["id"], child.get("doc_path", ""))
+                branch = "└─" if index == len(children) - 1 else "├─"
+                child_title = linked_domain_title(child, child_doc_rel, from_modules_root=from_modules_root)
+                lines.append(f"  {branch} {child_title}：{child['summary']}")
+        else:
+            lines.append("  └─ 当前没有单独拆出的第二层专题域，直接进入这一层 README 查看边界、关键入口和阅读建议。")
+
+        lines.append("")
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def update_modules_readme(doc_root: Path, module_docs: dict, architecture_domains: list[dict] | None = None) -> None:
+    architecture_domains = architecture_domains or []
+    architecture_lines = render_domain_architecture_map(
+        module_docs,
+        architecture_domains,
+        from_modules_root=True,
+    )
     lines = [
         "# 模块文档",
         "",
-        "这个目录只负责两层事情：先解释项目有哪些第一层功能域，再解释每个功能域下有哪些第二层专题域。",
-        "它不负责继续展开第三层实现细节；第三层应该留给各个第二层专题域自己的 README 和叶子文档去解释。",
+        "这里按当前项目的功能架构列出第一层功能域，以及已经单独拆出的第二层专题域。",
+        "第一次接手时，先在这里判断问题落在哪一层，再进入对应 README 继续下钻。",
         "",
         "## 这份文档怎么用",
         "",
-        "- 先看第一层功能域，建立项目的大体功能分层",
-        "- 再按问题进入对应的第二层专题域",
-        "- 如果问题已经落到具体实现链，继续去专题域 README 或叶子文档，不要在这里停留",
+        "- 先按第一层功能域判断问题落在交互面、共享契约还是后端运行时。",
+        "- 如果某个功能域已经拆出了第二层专题域，优先继续进入对应专题。",
+        "- 如果某个功能域还没有继续下钻，直接进入这一层 README 查看边界、关键入口和阅读建议。",
         "",
-        "## 按问题找文档",
+        "## 当前功能架构",
         "",
     ]
-    active_route_hints = [route_hints[path] for path in module_docs.keys() if path in route_hints]
-    if active_route_hints:
-        lines.extend([f"- {item}" for item in active_route_hints])
-    else:
-        lines.append("- 当前功能域集合更适合按列表顺序逐个进入。")
-    lines.extend(
-        [
-        "",
-        "## 第一层功能域",
-        "",
-    ])
-    if level_one_domains:
-        for domain in level_one_domains:
-            doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
-            link_path = Path(doc_rel).relative_to("modules").as_posix() if doc_rel else ""
-            lines.append(f"- [`{domain['title']}`](./{Path(link_path).as_posix()})：{domain['summary']}")
-    else:
-        lines.append("_暂时为空。_")
+    lines.extend(architecture_lines)
     lines.extend(
         [
             "",
-            "## 第二层专题域概览",
+            "## 继续下钻时的原则",
             "",
-        ]
-    )
-    if level_two_domains:
-        has_children = False
-        for parent in level_one_domains:
-            children = grouped.get(parent["id"], [])
-            if not children:
-                continue
-            has_children = True
-            lines.append(f"### {parent['title']}")
-            lines.append("")
-            for domain in children:
-                doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
-                link_path = Path(doc_rel).relative_to("modules").as_posix() if doc_rel else ""
-                lines.append(f"- [`{domain['title']}`](./{Path(link_path).as_posix()})：{domain['summary']}")
-            lines.append("")
-        if not has_children:
-            lines.append("_当前没有登记第二层专题域。_")
-    else:
-        lines.append("_当前没有登记第二层专题域。_")
-    lines.extend(
-        [
-            "",
-            "## 读到这里之后",
-            "",
-            "- 如果你还在判断项目整体分层，继续看第一层功能域文档。",
-            "- 如果你已经知道问题落在哪个专题，直接进入对应的第二层专题域 README。",
-            "- 如果你已经在追某条具体实现链，不要继续看这份总索引，直接进入专题叶子文档。",
-            "## 建议下一步",
-            "",
-            "优先先读第一层功能域，再按问题下沉到第二层专题域；不要把这份根文档写成路径索引表。",
+            "- 这份索引只负责回答“先从哪一块进入”，不重复堆具体实现细节。",
+            "- 当问题已经明确落到某条专题链路时，直接进入对应专题 README 或叶子文档。",
+            "- 如果结构说明和代码冲突，以代码为准，再回头更新文档。",
         ]
     )
     (doc_root / "modules" / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
