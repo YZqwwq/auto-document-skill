@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 创建第二轮模块文档，并将其登记到 index.json。
+
+这一版把模块文档生成器从“模板解释器”降级为“证据打包器”：
+- 脚本负责收集路径事实、候选信号、阅读锚点和待确认问题
+- 最终职责判断保留给后续 agent 与用户共同确认
 """
 
 from __future__ import annotations
@@ -29,6 +33,28 @@ SKILL_VERSION = "0.4.0"
 DOC_SCHEMA_VERSION = "2.0.0"
 README_CANDIDATES = ("README.md", "README.mdx", "readme.md")
 MARKDOWN_SUFFIXES = {".md", ".mdx", ".markdown"}
+IGNORED_ENTRY_NAMES = {"__pycache__", ".ds_store"}
+TEXT_LIKE_SUFFIXES = {
+    ".md",
+    ".mdx",
+    ".markdown",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".vue",
+    ".py",
+    ".go",
+    ".java",
+    ".rs",
+    ".sh",
+}
+CODE_LIKE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".py", ".go", ".java", ".rs", ".sh"}
 SOURCE_DIR_HINTS = {"src", "app", "server", "client", "backend", "frontend", "lib", "packages"}
 DOC_DIR_HINTS = {"docs", "doc", "documentation", "developmentlog", "design", "spec", "specs"}
 BUILD_DIR_HINTS = {"out", "dist", "build", ".next"}
@@ -61,6 +87,107 @@ CORE_TRAIT_HINTS = {
     "django": "Django",
     "flask": "Flask",
 }
+STACK_CONFIG_HINTS = {
+    "package.json": "发现 `package.json`，说明仓库至少包含 Node.js / 前端工具链信号。",
+    "pyproject.toml": "发现 `pyproject.toml`，说明仓库可能包含 Python 工具链或 Python 模块。",
+    "Cargo.toml": "发现 `Cargo.toml`，说明仓库可能包含 Rust 模块。",
+    "go.mod": "发现 `go.mod`，说明仓库可能包含 Go 模块。",
+    "pom.xml": "发现 `pom.xml`，说明仓库可能包含 Java / Maven 工具链。",
+}
+SIGNAL_RULES = [
+    {
+        "id": "doc_like",
+        "title": "文档/知识候选",
+        "summary": "路径名、README 或 Markdown 比例提示这里更像说明、设计资料或知识沉淀位置。",
+        "path_names": DOC_DIR_HINTS,
+        "child_names": DOC_DIR_HINTS,
+        "file_suffixes": MARKDOWN_SUFFIXES,
+    },
+    {
+        "id": "source_like",
+        "title": "实现代码候选",
+        "summary": "路径名提示这里更像实现代码聚合位置，但真实入口和边界仍需回到代码确认。",
+        "path_names": SOURCE_DIR_HINTS,
+        "child_names": SOURCE_DIR_HINTS,
+        "file_suffixes": CODE_LIKE_SUFFIXES,
+    },
+    {
+        "id": "runtime_like",
+        "title": "运行时/服务候选",
+        "summary": "命名里出现 main、server、service、runtime、api 等词，提示这里可能接近运行编排或服务实现。",
+        "tokens": {"main", "server", "service", "services", "runtime", "api", "backend"},
+    },
+    {
+        "id": "ui_like",
+        "title": "界面/交互候选",
+        "summary": "命名里出现 renderer、view、page、component、frontend 等词，提示这里可能更靠近界面或交互层。",
+        "tokens": {"renderer", "view", "views", "page", "pages", "component", "components", "frontend", "client", "ui"},
+    },
+    {
+        "id": "shared_like",
+        "title": "共享能力候选",
+        "summary": "命名里出现 share、shared、common、lib 等词，提示这里可能是共享契约、公共能力或通用工具的承载处。",
+        "tokens": {"share", "shared", "common", "core", "lib", "libs"},
+    },
+    {
+        "id": "resource_like",
+        "title": "资源承载候选",
+        "summary": "路径名提示这里更像静态资源、素材或运行时附带资源的承载处。",
+        "path_names": RESOURCE_DIR_HINTS,
+        "child_names": RESOURCE_DIR_HINTS,
+        "tokens": {"assets", "public", "static", "resources"},
+    },
+    {
+        "id": "test_like",
+        "title": "测试/样例候选",
+        "summary": "命名里出现 test、spec、mock、fixture 等词，提示这里更像验证或示例材料，而不是主链实现。",
+        "path_names": TEST_DIR_HINTS,
+        "child_names": TEST_DIR_HINTS,
+        "tokens": {"test", "tests", "spec", "specs", "mock", "mocks", "fixture", "fixtures", "example", "examples"},
+    },
+    {
+        "id": "build_like",
+        "title": "构建产物候选",
+        "summary": "路径名提示这里更像构建输出或生成结果，适合核对，不适合直接当成长期真相来源。",
+        "path_names": BUILD_DIR_HINTS,
+        "child_names": BUILD_DIR_HINTS,
+        "tokens": {"dist", "build", "out", ".next"},
+    },
+    {
+        "id": "config_like",
+        "title": "配置入口候选",
+        "summary": "文件名或后缀提示这里更像工程配置、工具链清单或结构化参数入口。",
+        "file_names": CONFIG_FILE_HINTS,
+        "file_suffixes": {".json", ".yaml", ".yml", ".toml"},
+    },
+]
+ENTRY_NAME_WEIGHTS = {
+    "readme.md": ("说明入口候选", 12, "目录中存在 README，通常适合作为第一层导航入口。"),
+    "readme.mdx": ("说明入口候选", 12, "目录中存在 README，通常适合作为第一层导航入口。"),
+    "index.ts": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担导出或装配职责。"),
+    "index.tsx": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担页面或组件出口职责。"),
+    "index.js": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担导出或装配职责。"),
+    "index.jsx": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担页面或组件出口职责。"),
+    "main.ts": ("主链入口候选", 9, "文件名像主链入口，适合确认这里是否真的是运行起点。"),
+    "main.js": ("主链入口候选", 9, "文件名像主链入口，适合确认这里是否真的是运行起点。"),
+    "package.json": ("工程入口候选", 9, "这个文件通常能暴露脚本、依赖和工具链信息。"),
+}
+ENTRY_TOKEN_HINTS = [
+    ("entry", "入口候选", 5, "名字里出现 entry，可能承担切入或装配角色。"),
+    ("main", "主链入口候选", 5, "名字里出现 main，可能更接近主链起点。"),
+    ("app", "应用入口候选", 5, "名字里出现 app，可能更接近应用级装配入口。"),
+    ("router", "路由/分发候选", 4, "名字里出现 router，可能承担分发或路由职责。"),
+    ("route", "路由/分发候选", 4, "名字里出现 route，可能承担分发或路由职责。"),
+    ("service", "服务锚点候选", 4, "名字里出现 service，适合确认它是否是服务实现锚点。"),
+    ("provider", "能力提供者候选", 4, "名字里出现 provider，适合确认它是否提供上层能力。"),
+    ("client", "调用侧锚点候选", 4, "名字里出现 client，适合确认它是否是对外调用侧。"),
+    ("bridge", "桥接候选", 4, "名字里出现 bridge，适合确认它是否承担跨层桥接。"),
+    ("config", "配置锚点候选", 4, "名字里出现 config，适合确认它会影响哪些工作流。"),
+    ("schema", "结构定义候选", 4, "名字里出现 schema，适合确认这里是否约束数据形态。"),
+    ("types", "结构定义候选", 4, "名字里出现 types，适合确认这里是否约束数据形态。"),
+    ("model", "结构定义候选", 4, "名字里出现 model，适合确认这里是否保存领域模型。"),
+]
+REPRESENTATIVE_SCAN_SUFFIXES = CODE_LIKE_SUFFIXES | {".md", ".mdx", ".json", ".yaml", ".yml", ".toml"}
 
 
 def format_bullets(items: list[str]) -> str:
@@ -91,8 +218,12 @@ def collect_sample_entries(target_path: Path, limit: int = 12) -> list[str]:
         return [target_path.name]
     entries = sorted(target_path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
     sample = []
-    for entry in entries[:limit]:
+    for entry in entries:
+        if entry.name.lower() in IGNORED_ENTRY_NAMES:
+            continue
         sample.append(entry.name + ("/" if entry.is_dir() else ""))
+        if len(sample) >= limit:
+            break
     return sample
 
 
@@ -102,6 +233,8 @@ def collect_child_names(target_path: Path, limit: int = 12) -> tuple[list[str], 
     directories = []
     files = []
     for entry in sorted(target_path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+        if entry.name.lower() in IGNORED_ENTRY_NAMES:
+            continue
         if entry.is_dir():
             directories.append(entry.name)
         else:
@@ -175,47 +308,46 @@ def detect_project_traits(project_root: Path | None) -> list[str]:
     return traits
 
 
-def detect_module_kind(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> str:
-    normalized_path = relative_path.replace("\\", "/").strip("/").lower()
-    last_name = target_path.name.lower()
-    if target_path.is_file():
-        if last_name in CONFIG_FILE_HINTS or target_path.suffix.lower() in {".json", ".yaml", ".yml", ".toml"}:
-            return "config"
-        if target_path.suffix.lower() in MARKDOWN_SUFFIXES:
-            return "markdown"
-        if target_path.parent.name.lower() in BUILD_DIR_HINTS:
-            return "build_output_file"
-        return "generic_file"
+def path_display_name(path_text: str, is_dir: bool | None = None) -> str:
+    clean = path_text.replace("\\", "/").strip("/")
+    if not clean:
+        return "/"
+    name = clean.split("/")[-1]
+    if is_dir is True and not name.endswith("/"):
+        return name + "/"
+    return name
 
-    directory_names = {item.lower() for item in child_dirs}
-    markdown_count = sum(1 for name in child_files if Path(name).suffix.lower() in MARKDOWN_SUFFIXES)
-    if last_name in DOC_DIR_HINTS:
-        return "docs"
-    if last_name in BUILD_DIR_HINTS:
-        return "build_output"
-    if last_name in RESOURCE_DIR_HINTS:
-        return "resources"
-    if last_name in TEST_DIR_HINTS:
-        return "tests"
-    if normalized_path.endswith("src/main") or (last_name == "main" and {"services", "protocols", "database"}.intersection(directory_names)):
-        return "main_process_runtime"
-    if normalized_path.endswith("src/renderer") or last_name == "renderer":
-        return "ui_surface"
-    if normalized_path.endswith("src/preload") or last_name == "preload":
-        return "preload_bridge"
-    if normalized_path.endswith("src/share") or last_name == "share":
-        return "shared_contracts"
-    if "aiservice" in normalized_path or last_name in {"modelconfig", "prompt-resource"}:
-        return "ai_runtime"
-    if normalized_path.endswith("/task") or last_name == "task":
-        return "task_system"
-    if {"main", "preload", "renderer"}.issubset(directory_names):
-        return "electron_source"
-    if last_name in SOURCE_DIR_HINTS:
-        return "source"
-    if markdown_count >= max(2, len(child_files) // 2) and child_files:
-        return "docs"
-    return "generic_directory"
+
+def natural_join(items: list[str]) -> str:
+    cleaned = [item for item in items if item]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} 和 {cleaned[1]}"
+    return f"{'、'.join(cleaned[:-1])} 以及 {cleaned[-1]}"
+
+
+def path_name_parts(relative_path: str, target_path: Path) -> list[str]:
+    clean = relative_path.replace("\\", "/").strip("/")
+    parts = [part.lower() for part in clean.split("/") if part]
+    if target_path.name:
+        parts.append(target_path.name.lower())
+    return list(dict.fromkeys(parts))
+
+
+def suffix_label(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in MARKDOWN_SUFFIXES:
+        return "Markdown 文档"
+    if suffix in CODE_LIKE_SUFFIXES:
+        return "代码文件"
+    if suffix in {".json", ".yaml", ".yml", ".toml"}:
+        return "配置或结构化文本"
+    if suffix:
+        return f"`{suffix}` 文件"
+    return "无后缀文件"
 
 
 def sibling_modules(project_root: Path | None, target_path: Path) -> dict[str, str]:
@@ -245,12 +377,243 @@ def sibling_modules(project_root: Path | None, target_path: Path) -> dict[str, s
     return top_level
 
 
+def collect_stack_hints(project_root: Path | None, target_path: Path, project_traits: list[str]) -> list[str]:
+    hints = []
+    if project_traits:
+        hints.append(f"从依赖特征看，仓库当前至少暴露出 {natural_join(project_traits)} 等技术栈信号。")
+    if project_root is not None:
+        for name, statement in STACK_CONFIG_HINTS.items():
+            if (project_root / name).exists():
+                hints.append(statement)
+    if target_path.is_dir():
+        for name in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod"):
+            candidate = target_path / name
+            if candidate.exists():
+                hints.append(f"`{target_path.name or '.'}/` 下存在 `{name}`，说明这一块可能自带独立的工具链或子模块边界。")
+    return list(dict.fromkeys(hints))
+
+
+def collect_path_facts(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str], sample_entries: list[str], readme_path: Path | None, readme_summary: str | None) -> list[str]:
+    facts = [
+        f"当前路径是{'文件' if target_path.is_file() else '目录'}，相对路径为 `{relative_path}`。",
+        f"路径深度约为 {max(1, len([part for part in relative_path.split('/') if part]))} 层。",
+    ]
+    if target_path.is_file():
+        facts.append(f"文件类型信号：{suffix_label(target_path)}。")
+        facts.append(f"所在目录为 `{target_path.parent.name or '.'}`。")
+    else:
+        facts.append(f"当前可直接看到 {len(child_dirs)} 个子目录、{len(child_files)} 个文件。")
+        if sample_entries:
+            facts.append(f"首批可见条目包括 {natural_join([f'`{name}`' for name in sample_entries[:6]])}。")
+    if readme_path:
+        facts.append(f"同层存在 `{readme_path.name}`，这通常意味着这里已经有一层本地说明入口。")
+    if readme_summary:
+        facts.append(f"本地 README 摘要信号：{readme_summary}")
+    return facts
+
+
+def _match_rule_basis(rule: dict, relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> list[str]:
+    bases: list[str] = []
+    parts = set(path_name_parts(relative_path, target_path))
+    child_names = {name.lower() for name in child_dirs + child_files}
+    path_name = target_path.name.lower()
+    suffix = target_path.suffix.lower()
+
+    for candidate in rule.get("path_names", set()):
+        if candidate.lower() == path_name or candidate.lower() in parts:
+            bases.append(f"路径名包含 `{candidate}`。")
+            break
+    for candidate in rule.get("child_names", set()):
+        if candidate.lower() in child_names:
+            bases.append(f"子条目中出现 `{candidate}`。")
+            break
+    for token in rule.get("tokens", set()):
+        if any(token in item for item in parts | child_names):
+            bases.append(f"命名里出现 `{token}` 相关信号。")
+            break
+    if target_path.is_file():
+        for candidate in rule.get("file_names", set()):
+            if target_path.name.lower() == candidate.lower():
+                bases.append(f"文件名命中 `{candidate}`。")
+                break
+        if suffix and suffix in rule.get("file_suffixes", set()):
+            bases.append(f"文件后缀为 `{suffix}`。")
+    else:
+        if child_files:
+            markdown_count = sum(1 for name in child_files if Path(name).suffix.lower() in MARKDOWN_SUFFIXES)
+            code_count = sum(1 for name in child_files if Path(name).suffix.lower() in CODE_LIKE_SUFFIXES)
+            if rule["id"] == "doc_like" and markdown_count >= max(2, len(child_files) // 2):
+                bases.append("当前目录内 Markdown 文件占比较高。")
+            if rule["id"] == "doc_like" and any(name.lower() in {candidate.lower() for candidate in README_CANDIDATES} for name in child_files):
+                bases.append("当前目录内存在 README。")
+            if rule["id"] == "source_like" and code_count >= max(1, len(child_files) // 2):
+                bases.append("当前目录内可见代码文件占比较高。")
+    return bases
+
+
+def collect_module_signals(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> list[dict]:
+    signals = []
+    for rule in SIGNAL_RULES:
+        basis = _match_rule_basis(rule, relative_path, target_path, child_dirs, child_files)
+        if not basis:
+            continue
+        strength = min(5, max(1, len(basis)))
+        signals.append(
+            {
+                "id": rule["id"],
+                "title": rule["title"],
+                "summary": rule["summary"],
+                "basis": basis,
+                "signal_type": "module_candidate",
+                "signal_strength": strength,
+                "candidate": True,
+            }
+        )
+    signals.sort(key=lambda item: (-item["signal_strength"], item["title"]))
+    return signals
+
+
+def detect_module_kind(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> str:
+    signals = collect_module_signals(relative_path, target_path, child_dirs, child_files)
+    if signals:
+        return signals[0]["id"]
+    return "generic_file" if target_path.is_file() else "generic_directory"
+
+
+def score_entry_candidate(name: str, is_dir: bool) -> tuple[int, str, list[str]]:
+    score = 1
+    reasons: list[str] = []
+    clean = name.rstrip("/")
+    lower_name = clean.lower()
+
+    direct = ENTRY_NAME_WEIGHTS.get(lower_name)
+    if direct:
+        label, delta, reason = direct
+        score += delta
+        reasons.append(reason)
+    else:
+        label = "继续核对候选"
+
+    for token, token_label, delta, reason in ENTRY_TOKEN_HINTS:
+        if token in lower_name:
+            label = token_label
+            score += delta
+            reasons.append(reason)
+
+    suffix = Path(clean).suffix.lower()
+    if is_dir:
+        score += 2
+        reasons.append("这是一个子目录，通常可以继续向下核对职责分层。")
+    elif suffix in CODE_LIKE_SUFFIXES:
+        score += 3
+        reasons.append("这是一个代码文件，适合继续确认真实实现。")
+    elif suffix in MARKDOWN_SUFFIXES:
+        score += 2
+        reasons.append("这是一个说明文档，适合先建立上下文。")
+    elif suffix in {".json", ".yaml", ".yml", ".toml"}:
+        score += 2
+        reasons.append("这是一个配置或结构化文本文件，适合确认工具链与参数边界。")
+
+    if not reasons:
+        reasons.append("这个条目位于当前路径的第一层，适合作为继续核对的起点。")
+    return score, label, reasons
+
+
+def collect_entry_candidates(relative_path: str, target_path: Path, sample_entries: list[str], readme_path: Path | None) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+
+    def add_candidate(display_name: str, rel_path: str, is_dir: bool) -> None:
+        clean_rel = rel_path.replace("\\", "/").strip("/")
+        if not clean_rel or clean_rel in seen:
+            return
+        seen.add(clean_rel)
+        score, label, reasons = score_entry_candidate(display_name, is_dir)
+        candidates.append(
+            {
+                "path": clean_rel,
+                "name": display_name,
+                "label": label,
+                "basis": reasons,
+                "score": score,
+                "is_dir": is_dir,
+            }
+        )
+
+    if target_path.is_file():
+        add_candidate(target_path.name, relative_path, False)
+    else:
+        if readme_path:
+            readme_rel = (Path(relative_path) / readme_path.name).as_posix() if relative_path else readme_path.name
+            add_candidate(readme_path.name, readme_rel, False)
+        for entry in sample_entries[:8]:
+            is_dir = entry.endswith("/")
+            display_name = entry.rstrip("/")
+            rel_path = (Path(relative_path) / display_name).as_posix() if relative_path else display_name
+            add_candidate(display_name, rel_path, is_dir)
+
+    candidates.sort(key=lambda item: (-item["score"], item["path"]))
+    return candidates[:8]
+
+
+def infer_relationship_hints(siblings: dict[str, str], candidate_signals: list[dict]) -> list[str]:
+    hints = []
+    signal_ids = {item["id"] for item in candidate_signals}
+    if "source" in siblings and "docs" in siblings:
+        hints.append(f"仓库同时存在 `{siblings['source']}/` 与 `{siblings['docs']}/`，当前路径可能处在“文档解释”和“真实实现”之间的某个连接点。")
+    elif "source" in siblings:
+        hints.append(f"仓库存在 `{siblings['source']}/`，需要时应回到那里核对真实实现与调用链。")
+    if "build" in siblings and "build_like" not in signal_ids:
+        hints.append(f"仓库存在 `{siblings['build']}/`，若当前路径与构建输出有关，建议核对它与源码路径是否一致。")
+    if "resources" in siblings and "resource_like" not in signal_ids:
+        hints.append(f"仓库存在 `{siblings['resources']}/`，若当前路径涉及素材或静态资源，应继续确认引用关系。")
+    if not hints:
+        hints.append("当前路径与相邻模块的关系还不稳定，建议结合上一级目录与引用链一起确认。")
+    return hints
+
+
+def infer_open_questions(relative_path: str, target_path: Path, candidate_signals: list[dict], readme_summary: str | None) -> list[str]:
+    questions = [
+        f"`{relative_path}` 在当前 summary 语义里到底属于“稳定职责边界”还是“暂时的目录组织”?",
+    ]
+    signal_ids = {item["id"] for item in candidate_signals}
+    if target_path.is_dir():
+        questions.append("这里真正的阅读起点是 README、入口文件，还是某个更深层子目录?")
+    else:
+        questions.append("这个文件是主入口、辅助实现，还是仅仅因为命名显眼才被看到?")
+    if "doc_like" in signal_ids and "source_like" in signal_ids:
+        questions.append("这里同时出现文档和实现信号，后续文档里应把它写成“说明层”还是“实现层”?")
+    if "build_like" in signal_ids:
+        questions.append("这里是应该长期维护的源码面，还是一次构建后生成的结果面?")
+    if "config_like" in signal_ids:
+        questions.append("这里影响的是整个项目、某个子模块，还是只影响局部工具链?")
+    if readme_summary:
+        questions.append("README 的表述和当前代码结构是否一致，是否需要由用户补充长期目标而不是只描述当前状态?")
+    return questions[:6]
+
+
+def infer_update_conditions(relative_path: str, target_path: Path, candidate_signals: list[dict]) -> list[str]:
+    items = [
+        f"`{relative_path}` 下的目录结构、入口文件或关键说明发生实质变化时。",
+        "当前文档里列出的候选入口已经不再适合作为第一阅读顺序时。",
+    ]
+    signal_ids = {item["id"] for item in candidate_signals}
+    if "doc_like" in signal_ids:
+        items.append("README 或专题说明已经不能反映当前代码真相时。")
+    if "config_like" in signal_ids:
+        items.append("工具链、脚本命令或关键配置文件发生变化时。")
+    if target_path.is_dir():
+        items.append("当前路径内部职责被拆分、合并或迁移到其他目录时。")
+    return items
+
+
 def build_context(relative_path: str, target_path: Path, project_root: Path | None = None) -> dict:
     sample_entries = collect_sample_entries(target_path)
     child_dirs, child_files = collect_child_names(target_path)
     readme_path = find_local_readme(target_path)
     readme_summary = extract_markdown_summary(safe_read_text(readme_path) or "") if readme_path else None
-    kind = detect_module_kind(relative_path, target_path, child_dirs, child_files)
+    project_traits = detect_project_traits(project_root)
+    candidate_signals = collect_module_signals(relative_path, target_path, child_dirs, child_files)
     return {
         "relative_path": relative_path,
         "target_path": target_path,
@@ -260,546 +623,91 @@ def build_context(relative_path: str, target_path: Path, project_root: Path | No
         "child_files": child_files,
         "readme_path": readme_path,
         "readme_summary": readme_summary,
-        "project_traits": detect_project_traits(project_root),
-        "kind": kind,
+        "project_traits": project_traits,
+        "kind": candidate_signals[0]["id"] if candidate_signals else detect_module_kind(relative_path, target_path, child_dirs, child_files),
         "siblings": sibling_modules(project_root, target_path),
+        "path_facts": collect_path_facts(relative_path, target_path, child_dirs, child_files, sample_entries, readme_path, readme_summary),
+        "candidate_signals": candidate_signals,
+        "stack_hints": collect_stack_hints(project_root, target_path, project_traits),
+        "entry_candidates": collect_entry_candidates(relative_path, target_path, sample_entries, readme_path),
     }
 
 
-def list_child_directories(path: Path, limit: int = 8) -> list[str]:
-    if not path.exists() or not path.is_dir():
-        return []
-    result = []
-    for entry in sorted(path.iterdir(), key=lambda item: item.name.lower()):
-        if entry.is_dir():
-            result.append(entry.name)
-    return result[:limit]
+def render_signal(signal: dict) -> str:
+    basis_text = "；".join(signal.get("basis", [])) if signal.get("basis") else "缺少明确依据"
+    return f"`{signal['title']}`：{signal['summary']} 依据：{basis_text}"
 
 
-def known_entry_description(entry_name: str, parent_kind: str) -> str:
-    normalized = entry_name.rstrip("/")
-    lower_name = normalized.lower()
-    direct_map = {
-        "readme.md": "当前目录的导航入口或使用说明",
-        "main": "主进程、核心服务或主要运行编排位置",
-        "preload": "主进程向渲染层暴露能力的桥接层",
-        "renderer": "界面、视图与前端交互逻辑",
-        "share": "跨层共享的数据结构、实体或契约",
-        "services": "服务实现与流程编排",
-        "database": "数据存取或实体持久化相关实现",
-        "components": "可复用界面组件",
-        "views": "页面级视图入口",
-        "router": "页面路由与导航入口",
-        "assets": "静态资源或样式资源",
-        "index.ts": "常见的 TypeScript 入口文件",
-        "index.js": "常见的 JavaScript 入口文件",
-        "index.html": "前端页面入口",
-        "package.json": "依赖、脚本和构建入口的声明文件",
-    }
-    if lower_name in direct_map:
-        return direct_map[lower_name]
-    if any(token in lower_name for token in ("todo", "roadmap", "milestone", "plan")):
-        return "任务清单、路线说明或阶段规划文档"
-    suffix = Path(normalized).suffix.lower()
-    if suffix in {".ts", ".tsx", ".js", ".jsx", ".vue"}:
-        return "当前模块中的实现入口或关键逻辑文件"
-    if suffix in MARKDOWN_SUFFIXES:
-        return "说明文档或阅读入口"
-    if suffix in {".json", ".yaml", ".yml", ".toml"}:
-        return "配置或结构化数据文件"
-    if suffix in {".png", ".jpg", ".jpeg", ".svg", ".ico"}:
-        return "静态资源文件"
-    if entry_name.endswith("/"):
-        if parent_kind == "docs":
-            return "当前知识域下的子主题目录"
-        if parent_kind in {"source", "electron_source"}:
-            return "当前实现代码下的子目录"
-        if parent_kind == "build_output":
-            return "构建产物中的子目录"
-        return "当前模块下的重要子目录"
-    return "当前模块下的重要条目"
+def render_entry_candidate(entry: dict) -> str:
+    basis = "；".join(entry.get("basis", []))
+    display = f"`{entry['path']}`"
+    return f"{display}：{entry['label']}。{basis}"
 
 
-def infer_one_liner(context: dict) -> str:
+def context_positioning(context: dict) -> str:
     relative_path = context["relative_path"]
-    kind = context["kind"]
-    child_dirs = set(context["child_dirs"])
-    traits = " / ".join(context["project_traits"])
-    trait_prefix = f"这个 {traits} 项目" if traits else "这个项目"
-
-    if kind == "electron_source" and {"main", "preload", "renderer"}.issubset(child_dirs):
-        layers = ["主进程", "Preload 桥接", "渲染层界面"]
-        if "share" in child_dirs:
-            layers.append("跨层共享契约")
-        return f"`{relative_path}/` 是{trait_prefix}的源码主目录，承载{'、'.join(layers)}。"
-    if kind == "main_process_runtime":
-        return f"`{relative_path}/` 是{trait_prefix}的主进程与运行时控制面，负责承载服务编排、协议接入和持久化入口。"
-    if kind == "ui_surface":
-        return f"`{relative_path}/` 是{trait_prefix}的界面与交互面，负责页面、组件、前端服务和用户可见行为。"
-    if kind == "preload_bridge":
-        return f"`{relative_path}/` 是{trait_prefix}的桥接层，用于把主进程能力安全地暴露给渲染层。"
-    if kind == "shared_contracts":
-        return f"`{relative_path}/` 是{trait_prefix}的共享契约层，负责跨前后端复用的数据结构、实体和通用工具。"
-    if kind == "ai_runtime":
-        return f"`{relative_path}/` 是{trait_prefix}中与 AI 主链直接相关的实现位置，承载 agent runtime、模型配置或 prompt 资源。"
-    if kind == "task_system":
-        return f"`{relative_path}/` 是{trait_prefix}中负责 task、execution 与队列调度的实现位置。"
-    if kind == "source":
-        return f"`{relative_path}/` 是{trait_prefix}的主要实现代码目录，负责承载当前运行逻辑和核心模块分层。"
-    if kind == "docs":
-        return f"`{relative_path}/` 是项目的说明文档与理解入口，用于帮助人和 AI 快速建立当前状态认知。"
-    if kind == "build_output":
-        return f"`{relative_path}/` 是构建流程生成的输出目录，用于承载从源码编译得到的可运行结果。"
-    if kind == "resources":
-        return f"`{relative_path}/` 是项目的静态资源目录，主要保存打包或运行时会被加载的非代码文件。"
-    if kind == "tests":
-        return f"`{relative_path}/` 是项目的测试相关目录，用于验证当前实现的行为和边界。"
-    if kind == "config":
-        return f"`{relative_path}` 是项目的重要配置入口文件，会影响依赖、脚本或构建方式。"
-    if kind == "markdown":
-        return f"`{relative_path}` 是项目中的说明文档文件，用于补充理解当前模块或工作流。"
-    if kind == "build_output_file":
-        return f"`{relative_path}` 是构建流程产出的文件，应作为生成结果理解，而不是主要维护入口。"
-    if context["path_type"] == "文件":
-        return f"`{relative_path}` 是项目中的一个关键文件，承担当前模块的入口、配置或说明职责。"
-    return f"`{relative_path}/` 是项目中的一个工作目录，当前承担一组相关文件和子模块的聚合职责。"
-
-
-def infer_questions(context: dict) -> list[str]:
-    relative_path = context["relative_path"]
-    kind = context["kind"]
-    if kind == "docs":
-        return [
-            f"`{relative_path}/` 为什么存在，以及它当前主要服务哪类阅读需求",
-            "这里的内容更适合作为导航、专题说明，还是当前系统真相入口",
-            "第一次接手时应按什么顺序阅读这里的文档",
-        ]
-    if kind == "build_output":
-        return [
-            f"`{relative_path}/` 当前产出了哪些主要结果",
-            "它与源码目录是否保持镜像或对应关系",
-            "哪些内容属于生成结果，不应作为长期设计真相维护",
-        ]
-    if kind == "resources":
-        return [
-            f"`{relative_path}/` 里保存了哪些资源类型",
-            "这些资源在运行时、界面或打包流程中如何被引用",
-            "资源组织方式是否仍然符合当前项目边界",
-        ]
-    if kind == "config":
-        return [
-            f"`{relative_path}` 主要声明了哪些项目级配置",
-            "它会影响哪些运行、构建或开发工作流",
-            "当工具链变化时，这个文件应如何同步更新",
-        ]
-    return [
-        f"`{relative_path}` 现在主要负责什么",
-        "这个路径内部应优先读哪些目录或文件",
-        "它与其他模块的边界在哪里",
-    ]
-
-
-def infer_problem_statement(context: dict) -> str:
-    kind = context["kind"]
-    readme_path = context["readme_path"]
-    readme_hint = f"当前路径自带 `{readme_path.name}`，可作为进入该模块的第一层说明。" if readme_path else ""
-    if kind == "electron_source":
+    signal_titles = [f"“{signal['title']}”" for signal in context["candidate_signals"][:2]]
+    if signal_titles:
         return (
-            "这个模块承载应用的真实实现代码，是理解当前运行方式、运行时边界和业务入口的首要位置。"
-            "对 Electron 项目而言，这里通常也是主进程、渲染层与桥接层职责分离的落点。"
-            + (f" {readme_hint}" if readme_hint else "")
+            f"`{relative_path}` 当前主要暴露出 {natural_join(signal_titles)} 等候选信号。"
+            "这更像一个需要继续核对的证据入口，而不是已经被脚本确认的职责结论。"
         )
-    if kind == "source":
-        return (
-            "这个模块解决的是“把当前系统真实实现落在可维护的代码结构里”的问题。"
-            "当需要确认当前项目到底怎么运行时，应优先回到这里核对。"
-            + (f" {readme_hint}" if readme_hint else "")
-        )
-    if kind == "docs":
-        return (
-            "这个模块解决的是“在不先通读全部代码的情况下建立项目理解”的问题。"
-            "它通常用于沉淀当前系统真相、专题说明或阅读入口，帮助人和 AI 先获得上下文，再回到实现核对细节。"
-            + (f" {readme_hint}" if readme_hint else "")
-        )
-    if kind == "build_output":
-        return (
-            "这个模块解决的是“把源码产物落成可运行输出”的问题。"
-            "它让预览、打包或发布流程有明确产物，但不应替代源码目录作为主要维护入口。"
-        )
-    if kind == "resources":
-        return (
-            "这个模块用于收纳非代码资源，避免把图片、模板或运行资源散落在实现目录中。"
-            "它通常服务于界面展示、运行时加载或应用打包。"
-        )
-    if kind == "tests":
-        return "这个模块用于验证当前实现行为是否符合预期，帮助团队在迭代时及时发现回归或边界问题。"
-    if kind == "config":
-        return "这个文件主要服务于工具链和工程配置，不属于项目理念、运行时职责或实现边界的主文档范围。除非用户明确要求，否则不建议把它作为项目理解主入口。"
-    if kind == "markdown":
-        return "这个文件用于补充说明某一模块、流程或设计决策，帮助读者在进入代码之前建立必要的理解上下文。"
-    if context["path_type"] == "文件":
-        return "这个文件承担某个明确的入口或说明职责，适合在理解相关工作流时作为快速切入点。"
-    return (
-        "这个模块用于把一组相关文件组织在同一个工作域中。"
-        "虽然它未必是整个项目的主入口，但它仍然代表了一块需要独立理解的当前状态。"
-        + (f" {readme_hint}" if readme_hint else "")
-    )
-
-
-def infer_structure(context: dict) -> str:
-    child_dirs = context["child_dirs"]
-    child_files = context["child_files"]
-    kind = context["kind"]
-    target_path = context["target_path"]
-    if kind == "electron_source" and {"main", "preload", "renderer"}.issubset(set(child_dirs)):
-        main_subdirs = list_child_directories(target_path / "main")
-        services_subdirs = list_child_directories(target_path / "main" / "services")
-        bullets = [
-            "`main/`：主进程入口、服务实现和运行编排",
-            "`preload/`：主进程与渲染层之间的桥接暴露层",
-            "`renderer/`：页面、组件、视图与前端交互逻辑",
-        ]
-        if "share" in child_dirs:
-            bullets.append("`share/`：跨层共享的数据结构、缓存或领域实体")
-        extra = []
-        if {"services", "protocols", "database"}.intersection(set(main_subdirs)):
-            extra.append("`main/` 内部又进一步承载服务编排、协议接入和持久化层。")
-        if services_subdirs:
-            extra.append(f"`main/services/` 当前还承载 {', '.join(sorted(services_subdirs[:5]))} 等服务主题。")
-        text = "这个目录当前可以按运行时职责理解为以下几层：\n\n" + format_bullets(bullets)
-        if extra:
-            text += "\n\n" + "\n".join(extra)
-        return text
-    if kind == "docs":
-        bullets = []
-        if context["readme_path"]:
-            bullets.append(f"`{context['readme_path'].name}`：当前目录的导航入口")
-        bullets.extend([f"`{name}/`：当前知识域下的子主题目录" for name in child_dirs[:5]])
-        readme_name = context["readme_path"].name if context["readme_path"] else None
-        bullets.extend([f"`{name}`：当前目录下的说明文档" for name in child_files[:4] if name != readme_name])
-        if not bullets:
-            bullets.extend([f"`{name}`：当前目录下的重要条目" for name in context["sample_entries"][:6]])
-        return "这个目录当前以“导航入口 + 子主题目录 + 补充说明文件”的方式组织：\n\n" + format_bullets(bullets[:8])
-    if kind == "build_output":
-        bullets = [f"`{name}/`：构建产物中的子目录" for name in child_dirs[:6]]
-        bullets.extend([f"`{name}`：构建生成的输出文件" for name in child_files[:4]])
-        return "当前可见条目表明，这个目录主要保存以下输出结构：\n\n" + format_bullets(bullets[:8])
-    if kind == "resources":
-        bullets = [f"`{name}/`：资源子目录" for name in child_dirs[:6]]
-        bullets.extend([f"`{name}`：静态资源文件" for name in child_files[:4]])
-        if bullets:
-            return "这个目录当前以资源类型或使用场景进行组织：\n\n" + format_bullets(bullets[:8])
-    if context["path_type"] == "文件":
-        return "这是一个单文件模块，结构重点不在内部层级，而在它与所在目录及相关工作流的连接方式。"
-    bullets = []
-    bullets.extend([f"`{name}/`：当前模块下的重要子目录" for name in child_dirs[:6]])
-    bullets.extend([f"`{name}`：当前模块下的关键文件" for name in child_files[:4]])
-    if bullets:
-        return "当前这个模块主要通过以下条目组织内容：\n\n" + format_bullets(bullets[:8])
-    return "当前模块规模较小，适合直接从现有条目进入阅读。"
-
-
-def infer_key_entries(context: dict) -> list[str]:
-    entries = context["sample_entries"]
-    kind = context["kind"]
-    key_entries = []
-    for name in entries[:8]:
-        key_entries.append(f"`{name}`：{known_entry_description(name, kind)}")
-    return key_entries or ["无"]
-
-
-def infer_question_routes(context: dict) -> list[str]:
-    kind = context["kind"]
-    child_dirs = set(context["child_dirs"])
-    target_path = context["target_path"]
-    items = []
-    if kind == "docs":
-        if child_dirs:
-            items.append(f"先按子主题目录继续下钻，例如 `{child_dirs[0]}/`。")
-        if context["child_files"]:
-            items.append(f"说明文件通常可以从 `{context['child_files'][0]}` 开始。")
-        items.append("读完文档后，如果要确认当前真实行为，回到 `src/` 核对代码链路。")
-        return items
-    if kind in {"electron_source", "source"}:
-        if "main" in child_dirs:
-            items.append("想理解主流程、服务编排或 runtime 控制面时，先读 `main/`。")
-            services_subdirs = set(list_child_directories(target_path / "main" / "services"))
-            if "aiservice" in services_subdirs:
-                items.append("想理解主 agent、消息队列和 AI runtime 主链时，继续进入 `main/services/aiservice/`。")
-            if "task" in services_subdirs:
-                items.append("想理解 task、execution、notification 和子 agent 执行链时，进入 `main/services/task/`。")
-            for service_name in sorted(services_subdirs - {"aiservice", "task"})[:2]:
-                items.append(f"如果问题已经落到 `{service_name}` 这类具体服务主题，可以继续进入 `main/services/{service_name}/`。")
-        if "renderer" in child_dirs:
-            items.append("想理解界面、交互和页面组织时，先读 `renderer/`。")
-        if "preload" in child_dirs:
-            items.append("想核对主进程与渲染层桥接边界时，先读 `preload/`。")
-        if "share" in child_dirs:
-            items.append("想理解跨层共享状态、实体或契约时，进入 `share/`。")
-        return items
-    if kind == "build_output":
-        return [
-            "想确认最终构建产物是否与源码结构一致时，查看这里。",
-            "如果任务是理解系统设计或修改实现，不要先从这里开始，应回到 `src/`。",
-        ]
-    if kind == "resources":
-        return [
-            "想知道有哪些静态资源时，查看这里。",
-            "想知道资源是如何被使用的，应回到 `src/` 查找引用点。",
-        ]
-    if context["sample_entries"]:
-        return [f"如果暂时没有更明确的问题入口，可以先从 `{context['sample_entries'][0]}` 开始。"]
-    return ["当前模块更适合作为局部阅读入口，而不是问题分流中心。"]
-
-
-def infer_maintenance_principles(context: dict) -> list[str]:
-    kind = context["kind"]
-    if kind == "docs":
-        return [
-            "导航型文档负责告诉读者怎么读，不应把所有专题细节都压进一篇文档里。",
-            "解释当前系统怎么工作的文档应维护为当前真相，待办和路线文档不能替代实现结论。",
-            "如果文档与代码冲突，应先以代码为运行时真相，再回头修正文档。",
-        ]
-    if kind in {"electron_source", "source"}:
-        return [
-            "优先维护模块职责、边界和关键入口，而不是逐文件复述实现细节。",
-            "当目录分层或主链入口发生变化时，应整体重写本文件，而不是只补局部描述。",
-            "如果解释性文档与代码冲突，应先以代码为准，再同步修正文档入口。",
-        ]
-    if kind == "build_output":
-        return [
-            "这里主要作为产物核对面，不应承载长期人工维护的系统说明。",
-            "如果输出结构与源码结构长期不一致，应优先修正源码或构建说明，而不是扩写这里。",
-        ]
-    if kind == "resources":
-        return [
-            "这里关注资源类型、组织方式和引用边界，不扩写工具链细节。",
-            "当资源目录重组或引用路径变化时，应同步更新本文件与相关源码文档。",
-        ]
-    return [
-        "维护时优先说明当前职责和边界，避免把无关历史和工程细节混入正文。",
-        "如果这个路径不再是主要阅读入口，应减少描述而不是继续扩写噪音。",
-    ]
-
-
-def infer_boundaries(context: dict) -> list[str]:
-    kind = context["kind"]
-    siblings = context["siblings"]
-    if kind in {"electron_source", "source"}:
-        items = ["这里关注当前实现代码和运行逻辑，而不是设计历史或发布产物。"]
-        if "docs" in siblings:
-            items.append(f"架构说明、阅读导航或专题背景主要应在 `{siblings['docs']}/` 中维护。")
-        if "build" in siblings:
-            items.append(f"构建后的结果属于 `{siblings['build']}/`，不应把它当成主要维护真相。")
-        if "resources" in siblings:
-            items.append(f"静态资源应主要在 `{siblings['resources']}/` 中维护，再由实现代码去引用。")
-        return items
-    if kind == "docs":
-        items = ["这里负责解释当前系统结构、阅读顺序或专题说明，而不是承载运行时代码。"]
-        if "source" in siblings:
-            items.append(f"当文档和实现冲突时，应回到 `{siblings['source']}/` 以代码为准。")
-        items.append("未来计划、待办或讨论内容不能替代当前实现真相。")
-        return items
-    if kind == "build_output":
-        items = ["这里属于生成结果层，适合用于核对构建输出，不适合承载主要人工维护。"]
-        if "source" in siblings:
-            items.append(f"真正的实现边界和长期真相应回到 `{siblings['source']}/` 中理解。")
-        if "resources" in siblings:
-            items.append(f"如果输出中包含资源复制结果，其原始来源通常在 `{siblings['resources']}/`。")
-        return items
-    if kind == "resources":
-        items = ["这里负责保存资源文件，不应混入过多业务逻辑实现。"]
-        if "source" in siblings:
-            items.append(f"资源如何被加载、消费或映射，应回到 `{siblings['source']}/` 中核对。")
-        if "build" in siblings:
-            items.append(f"构建后资源的最终呈现位置可能出现在 `{siblings['build']}/`。")
-        return items
-    if kind == "config":
-        return [
-            "这里主要定义工程配置和工具链约束，而不是直接承载项目理念或业务实现。",
-            "需要理解系统行为时，应优先回到源码目录、设计文档和运行时入口核对真实实现。",
-        ]
-    return [
-        "这份文档只解释当前路径本身及其直接关联的阅读入口，不尝试代替整个项目总览。",
-        "当这里与相邻模块发生职责重划时，应同步更新边界描述。",
-    ]
-
-
-def infer_relationships(context: dict) -> list[str]:
-    kind = context["kind"]
-    siblings = context["siblings"]
-    items = []
-    if kind in {"electron_source", "source"}:
-        if "docs" in siblings:
-            items.append(f"与 `{siblings['docs']}/`：文档提供阅读导航，代码提供运行时真相。")
-        if "build" in siblings:
-            items.append(f"与 `{siblings['build']}/`：构建产物通常来源于这里的实现。")
-        if "resources" in siblings:
-            items.append(f"与 `{siblings['resources']}/`：实现代码会消费或打包这些资源。")
-    elif kind == "docs":
-        if "source" in siblings:
-            items.append(f"与 `{siblings['source']}/`：这里解释结构，源码负责落实真实行为。")
-        if "build" in siblings:
-            items.append(f"与 `{siblings['build']}/`：发布或预览产物可以帮助验证文档描述是否仍然贴合当前实现。")
-    elif kind == "build_output":
-        if "source" in siblings:
-            items.append(f"与 `{siblings['source']}/`：这是最主要的来源关系，输出结果应能映射回源码层级。")
-        if "resources" in siblings:
-            items.append(f"与 `{siblings['resources']}/`：资源文件可能被复制或打包到这里。")
-    elif kind == "resources":
-        if "source" in siblings:
-            items.append(f"与 `{siblings['source']}/`：代码决定资源如何被引用、显示或分发。")
-        if "build" in siblings:
-            items.append(f"与 `{siblings['build']}/`：打包或构建后，资源通常会出现在该输出目录中。")
-    elif kind == "config":
-        if "source" in siblings:
-            items.append(f"与 `{siblings['source']}/`：配置决定部分源码的运行、编译或加载方式。")
-        if "build" in siblings:
-            items.append(f"与 `{siblings['build']}/`：构建配置会直接影响输出形态。")
-
-    if not items and context["readme_path"]:
-        items.append(f"与 `{context['readme_path'].name}`：该说明文件通常是理解当前路径的第一入口。")
-    if not items:
-        items.append("它与相邻模块的关系需要结合当前目录树和调用链一起阅读。")
-    return items
-
-
-def infer_reading_advice(context: dict) -> list[str]:
-    kind = context["kind"]
-    readme_path = context["readme_path"]
-    child_dirs = context["child_dirs"]
-    sample_entries = context["sample_entries"]
-    items = []
-    if readme_path:
-        items.append(f"第一次接手时，先读 `{readme_path.name}` 获取当前路径的导航信息。")
-    if kind == "electron_source":
-        if "main" in child_dirs:
-            items.append("要理解主流程或主进程行为时，优先进入 `main/`。")
-        if "renderer" in child_dirs:
-            items.append("要理解界面、视图或交互行为时，进入 `renderer/`。")
-        if "preload" in child_dirs:
-            items.append("要核对前后端桥接边界时，检查 `preload/`。")
-        return items
-    if kind == "docs":
-        if child_dirs:
-            items.append(f"读完导航入口后，再按主题进入 `{child_dirs[0]}/` 等子目录。")
-        items.append("读完说明文档后，应回到真实代码目录核对关键链路。")
-        return items
-    if kind == "build_output":
-        items.append("理解业务逻辑时不要从这里开始，优先回到对应源码目录。")
-        items.append("当怀疑构建结果与源码不一致时，再用这里核对最终输出。")
-        return items
-    if kind == "resources":
-        items.append("先确认资源文件的命名和组织方式，再回到源码里查找引用点。")
-        return items
-    if kind == "config":
-        items.append("除非任务明确要求处理工程配置，否则不要把这里当成项目理解主入口。")
-        items.append("如果确实需要看配置，先确认它影响哪个源码目录，再回到实现侧继续阅读。")
-        return items
-    if sample_entries:
-        items.append(f"如果没有更明确的入口，可以先从 `{sample_entries[0]}` 开始。")
-    items.append("遇到边界不清的地方时，结合上一级目录文档和真实代码一起核对。")
-    return items
-
-
-def infer_update_conditions(context: dict) -> list[str]:
-    relative_path = context["relative_path"]
-    kind = context["kind"]
-    items = [
-        f"`{relative_path}` 下的任何实质性变化",
-        "会影响该路径与其他模块交互边界的变化",
-    ]
-    if kind == "docs":
-        items.append("阅读入口、目录角色或文档分层方式发生变化")
-    if kind == "build_output":
-        items.append("构建输出层级与源码层级的映射关系发生变化")
-    if kind == "resources":
-        items.append("资源组织方式、命名规则或加载路径发生变化")
-    if kind == "config":
-        items.append("依赖、脚本命令或构建参数发生变化")
-    return items
+    if context["target_path"].is_file():
+        return f"`{relative_path}` 当前还没有明显的类型信号，它更像一个需要结合上下文再判断的单文件入口。"
+    return f"`{relative_path}` 当前还没有明显的职责信号，它更像一个需要结合上层 summary 再判断的目录容器。"
 
 
 def render_module_doc(relative_path: str, target_path: Path, project_root: Path | None = None) -> str:
     context = build_context(relative_path, target_path, project_root)
     path_type = "文件" if target_path.is_file() else "目录"
-    sample_list = format_bullets(infer_key_entries(context))
-    question_list = format_bullets(infer_questions(context))
-    route_list = format_bullets(infer_question_routes(context))
-    boundary_list = format_bullets(infer_boundaries(context))
-    relationship_list = format_bullets(infer_relationships(context))
-    maintenance_list = format_bullets(infer_maintenance_principles(context))
-    reading_list = format_bullets(infer_reading_advice(context))
-    update_list = format_bullets(infer_update_conditions(context))
     return f"""# 模块：{relative_path}
 
-## 一句话定位
+## 当前证据定位
 
-{infer_one_liner(context)}
+{context_positioning(context)}
 
 ## 范围
 
 - 路径：`{relative_path}`
 - 类型：`{path_type}`
 
-## 这份文档回答什么问题
+## 可直接观察到的事实
 
-{question_list}
+{format_bullets(context["path_facts"])}
 
-## 这个模块解决什么问题
+## 技术栈线索
 
-{infer_problem_statement(context)}
+{format_bullets(context["stack_hints"])}
 
-## 内部结构速览
+## 候选信号
 
-{infer_structure(context)}
+{format_bullets([render_signal(item) for item in context["candidate_signals"]]) if context["candidate_signals"] else "- 暂无明显信号"}
 
-## 按问题找文档或目录
+## 优先核对的入口或条目
 
-{route_list}
+{format_bullets([render_entry_candidate(item) for item in context["entry_candidates"]]) if context["entry_candidates"] else "- 暂无可用入口"}
 
-## 关键文件或条目
+## 相邻路径提示
 
-{sample_list}
+{format_bullets(infer_relationship_hints(context["siblings"], context["candidate_signals"]))}
 
-## 运行时边界
+## 继续确认的问题
 
-{boundary_list}
-
-## 与其他模块的关系
-
-{relationship_list}
-
-## 当前维护原则
-
-{maintenance_list}
-
-## 阅读建议
-
-{reading_list}
+{format_bullets(infer_open_questions(relative_path, target_path, context["candidate_signals"], context["readme_summary"]))}
 
 ## 何时更新本文件
 
-{update_list}
+{format_bullets(infer_update_conditions(relative_path, target_path, context["candidate_signals"]))}
 """
 
 
 def format_domain_path_entry(context: dict) -> str:
     relative_path = context["relative_path"]
-    summary = infer_one_liner(context)
-    summary = summary.replace(f"`{relative_path}/` 是", "", 1)
-    summary = summary.replace(f"`{relative_path}` 是", "", 1)
-    return f"`{relative_path}`：{summary.strip()}"
-
-
-def path_display_name(path_text: str, is_dir: bool | None = None) -> str:
-    clean = path_text.replace("\\", "/").strip("/")
-    if not clean:
-        return "/"
-    name = clean.split("/")[-1]
-    if is_dir is True and not name.endswith("/"):
-        return name + "/"
-    return name
+    statement = context_positioning(context)
+    prefix = f"`{relative_path}` "
+    if statement.startswith(prefix):
+        statement = statement[len(prefix):]
+    return f"`{relative_path}`：{statement}"
 
 
 def shared_prefix_parts(paths: list[str]) -> list[str]:
@@ -828,24 +736,8 @@ def compact_context_entries(contexts: list[dict]) -> tuple[str | None, list[tupl
         suffix_parts = parts[len(prefix_parts):] if prefix_parts else parts
         suffix_text = "/".join(suffix_parts) if suffix_parts else parts[-1]
         label = path_display_name(suffix_text, context["target_path"].is_dir())
-        entries.append((label, infer_one_liner(context).replace(f"`{context['relative_path']}/` 是", "", 1).replace(f"`{context['relative_path']}` 是", "", 1).strip()))
+        entries.append((label, context_positioning(context).replace(f"`{context['relative_path']}` ", "", 1).strip()))
     return prefix_text, entries
-
-
-def compact_path_texts(paths: list[str]) -> tuple[str | None, list[str]]:
-    if not paths:
-        return None, []
-    prefix_parts = shared_prefix_parts(paths)
-    prefix_text = "/".join(prefix_parts) if prefix_parts else None
-    items = []
-    for path in paths:
-        clean = path.replace("\\", "/").strip("/")
-        parts = clean.split("/") if clean else []
-        suffix_parts = parts[len(prefix_parts):] if prefix_parts else parts
-        suffix_text = "/".join(suffix_parts) if suffix_parts else (parts[-1] if parts else clean)
-        is_dir = Path(clean).suffix == ""
-        items.append(path_display_name(suffix_text, is_dir))
-    return prefix_text, items
 
 
 def render_compact_context_section(contexts: list[dict]) -> str:
@@ -855,20 +747,6 @@ def render_compact_context_section(contexts: list[dict]) -> str:
         lines.extend([f"路径前缀：`{prefix_text}/`", ""])
     lines.extend([f"- `{label}`：{summary}" for label, summary in entries])
     return "\n".join(lines) if lines else "- 暂无路径"
-
-
-def render_compact_key_entries(contexts: list[dict], limit_per_context: int = 4) -> str:
-    if not contexts:
-        return "- 暂无可用入口"
-    blocks: list[str] = []
-    for context in contexts:
-        base = context["relative_path"].replace("\\", "/").strip("/")
-        base_label = f"{base}/" if context["target_path"].is_dir() else base
-        blocks.append(f"在 `{base_label}` 下优先看：")
-        entries = infer_key_entries(context)[:limit_per_context]
-        blocks.extend([f"- {entry}" for entry in entries])
-        blocks.append("")
-    return "\n".join(blocks).strip()
 
 
 def relative_doc_link(from_doc_rel: str, to_doc_rel: str) -> str:
@@ -889,11 +767,31 @@ def domain_ref_for_doc(target_domain: dict, current_doc_rel: str) -> str:
     return f"[`{target_domain['title']}`](./{relative_doc_link(current_doc_rel, target_doc_rel)})"
 
 
+def describe_domain_file_role(path: Path) -> str:
+    lower_name = path.name.lower()
+    suffix = path.suffix.lower()
+    if path.is_dir():
+        return "继续下钻候选目录"
+    if "readme" in lower_name:
+        return "说明入口候选"
+    if any(token in lower_name for token in ("index", "main", "entry", "app")):
+        return "实现入口候选"
+    if any(token in lower_name for token in ("config", "setting", "settings")) or suffix in {".json", ".yaml", ".yml", ".toml"}:
+        return "配置锚点候选"
+    if suffix in MARKDOWN_SUFFIXES:
+        return "文档补充候选"
+    if any(token in lower_name for token in ("test", "spec", "mock", "fixture")):
+        return "测试或样例候选"
+    if suffix in CODE_LIKE_SUFFIXES:
+        return "继续核对的实现文件"
+    return "继续核对的关键文件"
+
+
 def describe_domain_source_label(source_rel: str, domain_id: str) -> str:
     del domain_id
     path = Path(source_rel)
     label = describe_domain_file_role(path)
-    if label == "当前专题中的关键文件或入口":
+    if label == "继续核对的关键文件":
         return path_display_name(source_rel, path.suffix == "")
     return label
 
@@ -907,20 +805,6 @@ def source_ref(source_rel: str, current_doc_rel: str, domain_id: str) -> str:
 def labeled_source_ref(current_doc_rel: str, source_rel: str, label: str) -> str:
     target = relative_source_link(current_doc_rel, source_rel)
     return f"[`{label}`](./{target})"
-
-
-def existing_source_items(
-    project_root: Path,
-    current_doc_rel: str,
-    items: list[tuple[str, str, str | None]],
-) -> list[str]:
-    rendered: list[str] = []
-    for source_rel, label, description in items:
-        if not (project_root / source_rel).exists():
-            continue
-        link = labeled_source_ref(current_doc_rel, source_rel, label)
-        rendered.append(f"{link}：{description}" if description else link)
-    return rendered
 
 
 def render_local_domain_hierarchy(domain: dict, all_domains: list[dict]) -> str:
@@ -985,215 +869,44 @@ def render_local_domain_hierarchy(domain: dict, all_domains: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_domain_readme(domain: dict, all_domains: list[dict], project_root: Path) -> str:
-    title = domain["title"]
-    child_domains = [item for item in all_domains if item.get("parent_id") == domain["id"]]
-    contexts = [build_context(path, (project_root / path).resolve(), project_root) for path in domain.get("paths", []) if (project_root / path).exists()]
-    coverage_list = render_compact_context_section(contexts)
-    hierarchy_map = render_local_domain_hierarchy(domain, all_domains)
-
-    implementation_views = []
-    for context in contexts:
-        implementation_views.append(f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`：{infer_problem_statement(context)}")
-    split_views = [f"`{child['title']}`：{child['summary']}" for child in child_domains]
-    reading_items = []
-    if child_domains:
-        for child in child_domains:
-            reading_items.append(f"想看“{child['summary']}”相关内容时，进入 {domain_ref_for_doc(child, domain.get('doc_path', ''))}。")
-    else:
-        reading_items.append("这一层当前没有继续拆出的下级专题，读完这里后直接按相关实现路径回到代码。")
-
-    return f"""# 功能域：{title}
-
-## 定位
-
-{domain['summary']}
-
-## 当前功能层级
-
-{hierarchy_map}
-
-## 这一层主要承载什么
-
-{format_bullets(implementation_views)}
-
-## 这一层内部怎么分
-
-{format_bullets(split_views if split_views else implementation_views)}
-
-## 相关实现路径
-
-{coverage_list}
-
-## 阅读建议
-
-{format_bullets(reading_items)}
-"""
-
-
-def summarize_statement(text: str, max_chars: int = 88) -> str:
-    clean = text.replace("`", "").replace("\n", " ").strip()
-    clean = clean.removeprefix("这个模块").removeprefix("这个目录").removeprefix("这个文件").strip()
-    clean = clean.rstrip("。.!！?？")
-    if len(clean) > max_chars:
-        return clean[: max_chars - 3].rstrip() + "..."
-    return clean
-
-
-def join_code_refs(items: list[str]) -> str:
-    cleaned = [item for item in items if item]
-    if not cleaned:
-        return ""
-    if len(cleaned) == 1:
-        return cleaned[0]
-    if len(cleaned) == 2:
-        return f"{cleaned[0]} 和 {cleaned[1]}"
-    return f"{'、'.join(cleaned[:-1])} 以及 {cleaned[-1]}"
-
-
-def infer_domain_chain(domain: dict, contexts: list[dict], parent: dict | None = None) -> list[str]:
-    if not contexts:
-        items = [f"`{domain['title']}` 当前还缺少足够的实现证据，建议先回到相关路径补充分析。"]
-        if parent:
-            items.append(f"它位于 `{parent['title']}` 之下，后续应围绕更具体的职责边界继续细化。")
-        return items
-
-    context_labels = [
-        f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`"
-        for context in contexts[:3]
-    ]
-    problem_points = [summarize_statement(infer_problem_statement(context)) for context in contexts[:2]]
-    items = [f"`{domain['title']}` 当前主要由 {join_code_refs(context_labels)} 这些实现面共同支撑。"]
-    if problem_points:
-        items.append(f"这一专题主要解决 {join_code_refs(problem_points)} 这一类问题。")
-    if len(contexts) > 1:
-        items.append("阅读时应把这些路径当成同一条专题链上的不同协作面，而不是孤立目录分别理解。")
-    elif parent:
-        items.append(f"它是 `{parent['title']}` 之下继续收敛出来的具体实现面。")
-    return items
-
-
 def score_domain_file(path: Path, domain_id: str) -> int:
     del domain_id
-    name = path.name.lower()
-    suffix = path.suffix.lower()
     score = 1
-
-    if any(token in name for token in ("readme", "index", "main", "entry", "app")):
-        score += 7
-    if any(token in name for token in ("service", "provider", "manager", "controller", "handler")):
-        score += 6
-    if any(token in name for token in ("router", "client", "bridge", "adapter", "gateway", "ipc", "preload")):
-        score += 5
-    if any(token in name for token in ("model", "schema", "entity", "record", "type", "contract", "definition")):
-        score += 5
-    if any(token in name for token in ("store", "state", "cache", "repository", "repo")):
+    lower_name = path.name.lower()
+    if "readme" in lower_name:
+        score += 10
+    if any(token in lower_name for token in ("index", "main", "entry", "app")):
+        score += 8
+    if any(token in lower_name for token in ("config", "schema", "types", "model", "router", "route", "service", "provider", "client", "bridge")):
         score += 4
-    if any(token in name for token in ("queue", "dispatch", "scheduler", "worker", "job", "runtime")):
-        score += 4
-    if any(token in name for token in ("view", "page", "component", "form", "dialog")) or suffix == ".vue":
-        score += 4
-    if any(token in name for token in ("prompt", "template", "config", "resource")):
+    if any(token in lower_name for token in ("test", "spec", "mock", "fixture")):
+        score -= 4
+    if path.suffix.lower() in CODE_LIKE_SUFFIXES:
         score += 3
-    if any(token in name for token in ("test", "spec", "mock", "fixture")):
-        score -= 6
-    if suffix in {".ts", ".tsx", ".js", ".jsx", ".vue", ".py", ".go", ".java", ".rs"}:
+    elif path.suffix.lower() in MARKDOWN_SUFFIXES:
         score += 2
-    if suffix in {".md", ".mdx"} and "readme" in name:
-        score += 3
+    elif path.suffix.lower() in {".json", ".yaml", ".yml", ".toml"}:
+        score += 2
     if len(path.parts) <= 6:
         score += 1
     return score
 
 
-def infer_domain_call_summary(domain: dict, representative_files: list[str], contexts: list[dict], current_doc_rel: str | None = None) -> list[str]:
-    del domain
-    if representative_files:
-        refs = [
-            source_ref(path, current_doc_rel, "") if current_doc_rel else f"`{Path(path).name}`"
-            for path in representative_files[:3]
-        ]
-        roles = [describe_domain_file_role(Path(path)) for path in representative_files[:3]]
-        items = [f"{refs[0]} 往往是这条专题链最合适的切入点，通常承担{roles[0]}。"]
-        if len(refs) >= 2:
-            items.append(f"{refs[1]} 补充了与入口相邻的实现面，适合在读完第一处锚点后继续核对。")
-        if len(refs) >= 3:
-            items.append(f"{refs[2]} 往往能帮助确认这条链下游的协作方式或约束定义。")
-        elif len(contexts) > 1:
-            context_labels = [
-                f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`"
-                for context in contexts[:3]
-            ]
-            items.append(f"这块能力分散在 {join_code_refs(context_labels)} 等路径中，阅读时应在入口和协作面之间来回核对。")
-        else:
-            items.append("如果只保留一处实现锚点，后续应沿着它所在目录继续追到相邻服务、结构定义或桥接调用。")
-        return items
-
-    if contexts:
-        context_labels = [f"`{context['relative_path']}`" for context in contexts[:2]]
-        return [
-            f"{join_code_refs(context_labels)} 是当前专题最直接的实现入口。",
-            "当前还没有足够稳定的代表性文件，建议从这些覆盖路径继续顺着入口、定义和下游协作关系往下读。",
-        ]
-    return ["当前专题域暂未识别出稳定的调用关系，建议先补充覆盖路径或代表文件。"]
-
-
-def describe_domain_file_role(path: Path) -> str:
-    name = path.name
-    lower_name = name.lower()
-    suffix = path.suffix.lower()
-
-    if path.suffix == "":
-        if any(token in lower_name for token in ("service", "services")):
-            return "服务实现目录"
-        if any(token in lower_name for token in ("view", "views", "page", "pages", "component", "components")):
-            return "界面或交互目录"
-        if any(token in lower_name for token in ("model", "schema", "entity", "contract", "type")):
-            return "结构定义目录"
-        return "当前专题下的重要目录"
-
-    if "readme" in lower_name:
-        return "当前目录的阅读入口或说明文档"
-    if any(token in lower_name for token in ("index", "main", "entry", "bootstrap")):
-        return "入口文件或主链切入点"
-    if any(token in lower_name for token in ("service", "provider", "manager", "controller", "handler")):
-        return "服务实现或能力暴露入口"
-    if any(token in lower_name for token in ("router", "route", "client", "bridge", "adapter", "gateway", "ipc", "preload")):
-        return "跨层调用、桥接或请求入口"
-    if any(token in lower_name for token in ("model", "schema", "entity", "record", "type", "contract", "definition")):
-        return "数据结构、实体或约束定义"
-    if any(token in lower_name for token in ("store", "state", "cache", "repository", "repo")):
-        return "状态组织、缓存或数据访问入口"
-    if any(token in lower_name for token in ("queue", "dispatch", "scheduler", "worker", "job", "runtime")):
-        return "调度、运行控制或异步处理入口"
-    if any(token in lower_name for token in ("view", "page", "component", "form", "dialog")) or suffix == ".vue":
-        return "界面、页面或交互实现入口"
-    if any(token in lower_name for token in ("prompt", "template", "resource")):
-        return "模板、提示词或资源素材"
-    if any(token in lower_name for token in ("config", "setting", "settings")) or suffix in {".json", ".yaml", ".yml", ".toml"}:
-        return "配置或结构化数据文件"
-    if suffix in {".md", ".mdx"}:
-        return "说明文档或专题补充材料"
-    if any(token in lower_name for token in ("test", "spec", "mock", "fixture")):
-        return "测试、示例或辅助验证文件"
-    return "当前专题中的关键文件或入口"
-
-
 def collect_representative_domain_files(domain: dict, project_root: Path, limit: int = 8) -> list[str]:
     candidates: list[tuple[int, str]] = []
-    seen = set()
+    seen: set[str] = set()
     for rel in domain.get("paths", []):
         target = (project_root / rel).resolve()
+        if not target.exists():
+            continue
         if target.is_file():
             score = score_domain_file(target, domain["id"])
             candidates.append((score, rel.replace("\\", "/")))
             continue
-        if not target.exists():
-            continue
         for file_path in target.rglob("*"):
             if not file_path.is_file():
                 continue
-            if file_path.suffix.lower() not in {".ts", ".tsx", ".js", ".jsx", ".md"}:
+            if file_path.suffix.lower() not in REPRESENTATIVE_SCAN_SUFFIXES:
                 continue
             try:
                 rel_path = file_path.relative_to(project_root).as_posix()
@@ -1210,6 +923,65 @@ def collect_representative_domain_files(domain: dict, project_root: Path, limit:
     return [path for _, path in ranked[:limit]]
 
 
+def aggregate_context_signals(contexts: list[dict], limit: int = 8) -> list[str]:
+    grouped: dict[str, dict] = {}
+    for context in contexts:
+        label = f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`"
+        for signal in context.get("candidate_signals", []):
+            bucket = grouped.setdefault(
+                signal["id"],
+                {
+                    "title": signal["title"],
+                    "summary": signal["summary"],
+                    "paths": [],
+                    "basis": [],
+                    "strength": 0,
+                },
+            )
+            bucket["paths"].append(label)
+            bucket["basis"].extend(signal.get("basis", []))
+            bucket["strength"] = max(bucket["strength"], signal.get("signal_strength", 1))
+    ranked = sorted(grouped.values(), key=lambda item: (-len(item["paths"]), -item["strength"], item["title"]))
+    lines = []
+    for item in ranked[:limit]:
+        unique_paths = list(dict.fromkeys(item["paths"]))[:3]
+        unique_basis = list(dict.fromkeys(item["basis"]))[:2]
+        path_text = natural_join(unique_paths)
+        basis_text = "；".join(unique_basis) if unique_basis else "暂无更具体依据"
+        lines.append(f"`{item['title']}`：主要出现在 {path_text}。{item['summary']} 依据：{basis_text}")
+    return lines
+
+
+def collect_domain_open_questions(domain: dict, contexts: list[dict], child_domains: list[dict]) -> list[str]:
+    questions = [
+        f"`{domain['title']}` 这一层在用户确认后的 summary 中，究竟代表稳定功能域，还是只是当前实现阶段的临时分组?",
+    ]
+    if child_domains:
+        questions.append("下级专题域的拆分是否真的按职责边界完成，还是只是沿着目录树继续切?")
+    elif contexts:
+        questions.append("这几个覆盖路径之间到底谁是主链，谁只是辅助或补充材料?")
+    if any(context.get("readme_summary") for context in contexts):
+        questions.append("README 里的说法是否只是当前状态描述，还是能代表项目最终希望形成的长期结构?")
+    return questions[:5]
+
+
+def collect_domain_reading_items(domain: dict, contexts: list[dict], child_domains: list[dict], current_doc_rel: str) -> list[str]:
+    items = []
+    if child_domains:
+        for child in child_domains:
+            items.append(f"如果问题已经缩小到“{child['summary']}”，继续进入 {domain_ref_for_doc(child, current_doc_rel)}。")
+    else:
+        for context in contexts[:3]:
+            entries = context.get("entry_candidates", [])
+            if entries:
+                items.append(f"先从 `{entries[0]['path']}` 开始核对，再沿着相邻目录或调用链继续向下读。")
+            else:
+                items.append(f"先从 `{context['relative_path']}` 所在路径开始，再确认实际入口文件。")
+    if not items:
+        items.append("当前还缺少稳定阅读顺序，建议先回到 summary 和 structure 重新确认这一层的定位。")
+    return items[:6]
+
+
 def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) -> dict:
     title = domain["title"]
     current_doc_rel = domain.get("doc_path", "")
@@ -1217,6 +989,8 @@ def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) ->
     child_domains = [item for item in all_domains if item.get("parent_id") == domain["id"]]
     contexts = [build_context(path, (project_root / path).resolve(), project_root) for path in domain.get("paths", []) if (project_root / path).exists()]
     hierarchy_map = render_local_domain_hierarchy(domain, all_domains)
+    coverage_list = render_compact_context_section(contexts)
+    signal_items = aggregate_context_signals(contexts)
     analysis = {
         "id": domain["id"],
         "title": title,
@@ -1230,38 +1004,37 @@ def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) ->
         "contexts": [
             {
                 "path": context["relative_path"],
-                "summary": infer_one_liner(context),
-                "problem": infer_problem_statement(context),
+                "summary": context_positioning(context),
+                "signals": [signal["title"] for signal in context.get("candidate_signals", [])[:3]],
             }
             for context in contexts
         ],
+        "coverage_list": coverage_list,
+        "signal_items": signal_items,
+        "reading_items": collect_domain_reading_items(domain, contexts, child_domains, current_doc_rel),
+        "open_questions": collect_domain_open_questions(domain, contexts, child_domains),
     }
     if child_domains:
         analysis["doc_kind"] = "root"
-        analysis["implementation_views"] = [f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`：{infer_problem_statement(context)}" for context in contexts]
+        analysis["implementation_views"] = [
+            f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`：{context_positioning(context)}"
+            for context in contexts
+        ]
         analysis["split_views"] = [f"`{child['title']}`：{child['summary']}" for child in child_domains]
-        analysis["coverage_list"] = render_compact_context_section(contexts)
-        analysis["reading_items"] = (
-            [f"想看“{child['summary']}”相关内容时，进入 {domain_ref_for_doc(child, current_doc_rel)}。" for child in child_domains]
-            if child_domains
-            else ["这一层当前没有继续拆出的下级专题，读完这里后直接按相关实现路径回到代码。"]
-        )
         return analysis
 
     representative_files = collect_representative_domain_files(domain, project_root)
-    key_entries = []
-    for context in contexts:
-        for entry in infer_key_entries(context)[:3]:
-            key_entries.append(f"{source_ref(context['relative_path'], current_doc_rel, domain['id'])} -> {entry}")
+    related_paths = [
+        f"{source_ref(context['relative_path'], current_doc_rel, domain['id'])}：{context_positioning(context)}"
+        for context in contexts
+    ]
     analysis["doc_kind"] = "leaf"
-    analysis["coverage_list"] = format_bullets(
-        [
-            f"{source_ref(context['relative_path'], current_doc_rel, domain['id'])}：{format_domain_path_entry(context).split('：', 1)[1]}"
-            for context in contexts
-        ]
-    )
-    analysis["chain_list"] = infer_domain_chain(domain, contexts, parent)
-    analysis["call_summary_list"] = infer_domain_call_summary(domain, representative_files, contexts, current_doc_rel)
+    analysis["evidence_chain"] = [
+        f"`{domain['title']}` 当前主要由 {natural_join([f'`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`' for context in contexts[:3]])} 等路径提供证据。"
+        if contexts
+        else f"`{domain['title']}` 当前缺少稳定的覆盖路径，需要重新扫描或补充结构。"
+    ]
+    analysis["related_paths"] = related_paths
     analysis["representative_files"] = [
         {
             "path": path,
@@ -1269,7 +1042,11 @@ def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) ->
         }
         for path in representative_files
     ]
-    analysis["key_entries"] = key_entries[:8]
+    analysis["entry_candidates"] = [
+        render_entry_candidate(item)
+        for context in contexts
+        for item in context.get("entry_candidates", [])[:3]
+    ][:8]
     return analysis
 
 
@@ -1298,9 +1075,17 @@ def render_domain_doc_from_analysis(analysis: dict) -> str:
 
 {analysis.get('coverage_list', '- 暂无路径')}
 
+## 这一层暴露出的候选信号
+
+{format_bullets(analysis.get('signal_items', []))}
+
 ## 阅读建议
 
 {format_bullets(analysis.get('reading_items', []))}
+
+## 待确认问题
+
+{format_bullets(analysis.get('open_questions', []))}
 """
 
     return f"""# 功能域：{title}
@@ -1313,30 +1098,38 @@ def render_domain_doc_from_analysis(analysis: dict) -> str:
 
 {analysis['hierarchy_map']}
 
-## 核心作用
+## 证据链概览
 
-{format_bullets(analysis.get('chain_list', []))}
+{format_bullets(analysis.get('evidence_chain', []))}
 
-## 为什么这样实现
+## 候选信号
 
-{format_bullets(analysis.get('call_summary_list', []))}
+{format_bullets(analysis.get('signal_items', []))}
 
 ## 相关实现路径
 
-{analysis.get('coverage_list', '- 暂无路径')}
+{format_bullets(analysis.get('related_paths', [])) if analysis.get('related_paths') else '- 暂无路径'}
 
-## 关键文件
+## 优先核对文件
 
 {format_bullets([item['entry'] for item in analysis.get('representative_files', [])]) if analysis.get('representative_files') else '- 暂无代表性文件'}
 
-## 关键入口
+## 继续核对的入口
 
-{format_bullets(analysis.get('key_entries', [])) if analysis.get('key_entries') else "- 暂无可用入口"}
+{format_bullets(analysis.get('entry_candidates', [])) if analysis.get('entry_candidates') else '- 暂无可用入口'}
+
+## 待确认问题
+
+{format_bullets(analysis.get('open_questions', []))}
 """
 
 
 def render_domain_doc(domain: dict, all_domains: list[dict], project_root: Path) -> str:
     return render_domain_doc_from_analysis(analyze_domain(domain, all_domains, project_root))
+
+
+def render_domain_readme(domain: dict, all_domains: list[dict], project_root: Path) -> str:
+    return render_domain_doc(domain, all_domains, project_root)
 
 
 def doc_link_path(doc_rel: str, *, from_modules_root: bool = False) -> str:
