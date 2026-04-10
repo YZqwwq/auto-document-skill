@@ -1,4 +1,4 @@
 interface:
   display_name: "自动文档"
-  short_description: "构建并维护分层项目文档"
-  default_prompt: "使用 $auto-document 初始化项目文档，从整体到细节分析当前仓库，并在代码变更后保持受影响文档同步更新。"
+  short_description: "先确认项目 summary，再建立结构责任树与模块文档"
+  default_prompt: "使用 $auto-document 初始化项目文档。先生成并确认项目级 summary，再建立 project-structure 的结构责任树，最后生成 modules，并在代码变更后利用 git 感知维护受影响文档。"

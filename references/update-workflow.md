@@ -1,8 +1,37 @@
 # 更新工作流
 
-默认采用增量更新；当项目发生大范围调整时，切换到“收敛到当前状态”的工作流。
+新的自动文档工作流默认分成三层：
+
+1. `project-summary.md`
+2. `project-structure.md`
+3. `modules/`
+
+维护时必须先判断本次变化影响的是哪一层，再决定是否需要继续向下游扩散。
 
 ## 判断该更新什么
+
+### 重新确认 summary
+
+当项目级定位、服务目标、稳定架构理念发生变化时，优先重新确认 `overview/project-summary.md`。
+
+常见信号：
+
+- 根级 README 被大幅改写
+- 根级关键配置或启动方式发生变化
+- 出现新的顶层目录，说明项目已经多出新的系统面
+- 项目从“工具原型”转向“产品应用”这类定位变化
+
+一旦重新打开 summary 审查，下游 structure 和 modules 默认进入 `stale`。
+
+### 更新 structure
+
+当路径树或责任树发生变化时，更新 `overview/project-structure.md`。
+
+示例：
+
+- 顶层目录新增、删除或重命名
+- 某个服务从一个运行时面移动到另一个运行时面
+- 框架默认目录之上新增了一层项目自定义责任树
 
 ### 更新模块文档
 
@@ -10,38 +39,30 @@
 
 示例：
 
-- `src/main/**` 发生变化
-- `renderer/components/**` 发生变化
-- `packages/agent-runtime/**` 发生变化
-
-### 更新总览文档
-
-当项目整体叙事发生变化时，更新总览文档。
-
-示例：
-
-- 出现新的顶层目录
-- 运行时架构发生变化
-- 核心应用入口移动
-- 包管理、构建系统或部署模型发生变化
+- `src/main/**` 内部的运行时逻辑变更
+- `renderer/components/**` 的交互实现变更
+- `packages/agent-runtime/**` 的局部专题实现变更
 
 ### 两者都更新
 
-当局部代码变化同时改变系统边界时，同时更新总览文档和模块文档。
+当局部代码变化同时改变系统边界时，同时更新 structure 和模块文档。
 
 示例：
 
 - 一个模块被拆成多个新目录
-- 一个服务从某个运行时面移动到另一个运行时面
 - 一个后台子系统升级为顶层核心能力
+- 一个专题域的关键入口被整体迁移
 
 ## 中小规模变更的维护顺序
 
 1. 识别变更文件。
 2. 读取 `project-docs/index.json`。
-3. 如果项目启用了 git，优先比较 `git_state.aligned_head_sha` 与当前 `HEAD`。
-4. 将变更路径与已登记模块路径进行匹配。
-5. 判断是否还需要更新总览文档。
+3. 检查 `summary_state.status` 是否仍为 `confirmed`。
+4. 如果项目启用了 git，优先比较 `git_state.aligned_head_sha` 与当前 `HEAD`。
+5. 判断本次变化是否需要：
+   - 模块更新
+   - structure 重建
+   - summary 重新确认
 6. 更新受影响的文档。
 7. 清空或替换 `index.json` 里的 `pending_updates`。
 
@@ -56,31 +77,30 @@
 
 推荐顺序：
 
-1. 运行 `scan_project_tree.py` 或直接运行 `reconcile_project_docs.py`。
-2. 删除已经失效的模块文档。
-3. 重写当前仍有效模块的文档，并先自动补写一版当前状态正文。
-4. 重建 `modules/README.md`。
-5. 更新 `index.json` 的 `module_docs`、`generated_docs`、`tracked_paths`、`round_two_targets`。
-6. 清空 `pending_updates`，因为文档系统已经与当前状态重新对齐。
-
-如果希望在收敛时一并物理清除旧文档残留，可使用严格清理模式：
-
-```bash
-python scripts/reconcile_project_docs.py --project-root <repo-root> --prune-mode strict
-```
-
-这个模式会继续尝试：
-
-- 删除不再属于当前功能域集合的旧文档
-- 清理由旧平铺结构遗留的 `.md` 文件
-- 删除已经为空的模块目录
+1. 先判断 summary 是否仍成立。
+2. 如果 summary 不成立，先回到 summary 审查阶段。
+3. 如果 summary 仍成立，运行 `scan_project_tree.py` 或直接运行 `reconcile_project_docs.py`。
+4. 删除已经失效的模块文档。
+5. 重写当前仍有效模块的文档。
+6. 重建 `modules/README.md`。
+7. 更新 `index.json` 中的结构责任树、模块映射和状态字段。
+8. 清空 `pending_updates`，因为文档系统已经重新对齐。
 
 ## 当前状态优先原则
 
 - 文档目标是帮助 AI 和人理解项目当前状态，而不是保存设计变迁原因。
 - 收敛时优先反映“现在系统是什么样”，而不是解释“为什么变成这样”。
 - 对于已删除模块，直接从当前模块导航和索引中移除。
-- 对于仍然存在但结构变化很大的模块，优先整体重写并自动补写正文，再补人工描述。
+- 对于仍然存在但结构变化很大的模块，优先整体重写，再补人工描述。
+
+## 意图基线优先原则
+
+- `project-summary.md` 一旦被确认，就成为下游 structure 和 modules 的认知基线。
+- 代码本身不能替代“项目希望成为什么”的信息。
+- 如果项目仍在演进中，summary 应显式区分：
+  - 当前实现
+  - 长期目标
+- 当两者发生偏移时，不应直接让 AI 用当前代码覆盖掉原有项目意图。
 
 ## git 感知优先原则
 
@@ -92,7 +112,7 @@ python scripts/reconcile_project_docs.py --project-root <repo-root> --prune-mode
 
 ## 实用启发式规则
 
-- 如果像 `package.json`、`pyproject.toml`、`Cargo.toml` 这样的根级文件发生变化，检查 `project-summary.md`。
-- 如果顶层目录发生变化，检查 `project-structure.md`。
+- 如果像 `README.md`、`package.json`、`pyproject.toml`、`Cargo.toml` 这样的根级文件发生变化，优先检查 `project-summary.md`。
+- 如果顶层目录发生变化，优先检查 `project-structure.md`。
 - 如果变更路径已经登记了模块文档，优先更新该模块文档。
 - 如果同一变更影响多个运行时边界，优先增加简短交叉引用，而不是复制大段说明。
