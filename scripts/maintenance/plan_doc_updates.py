@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-在代码变更后规划文档的增量更新。
+在代码变更后规划文档维护动作。
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ from core.git_tracking import (
 )
 from core.workflow_state import (
     ensure_workflow_state,
+    mark_git_alignment_only,
     mark_hold,
+    mark_modules_stale,
     mark_structure_stale,
     mark_summary_stale,
     summary_gate_message,
@@ -31,41 +33,8 @@ from core.workflow_state import (
 
 DEFAULT_DOC_DIR = "project-docs"
 SKILL_NAME = "auto-document"
-SKILL_VERSION = "0.3.0"
-DOC_SCHEMA_VERSION = "1.2.0"
-IGNORED_ROOT_TOOLING_FILES = {
-    "package.json",
-    "pnpm-lock.yaml",
-    "package-lock.json",
-    "yarn.lock",
-    "pyproject.toml",
-    "requirements.txt",
-    "Cargo.toml",
-    "go.mod",
-    "tsconfig.json",
-    "tsconfig.node.json",
-    "tsconfig.web.json",
-    "vite.config.ts",
-    "vite.config.js",
-    "electron.vite.config.ts",
-    "electron-builder.yml",
-    "electron-builder.yaml",
-    "eslint.config.mjs",
-    "postcss.config.mjs",
-    "tailwind.config.js",
-    "tailwind.config.ts",
-    "dev-app-update.yml",
-}
-SUMMARY_TRIGGER_FILES = {
-    "README.md",
-    "ARCHITECTURE.md",
-    "architecture.md",
-    "SYSTEM.md",
-    "system.md",
-    "DESIGN.md",
-    "design.md",
-    "CONTRIBUTING.md",
-}
+SKILL_VERSION = "0.4.0"
+DOC_SCHEMA_VERSION = "2.0.0"
 STRUCTURE_DOC = "overview/project-structure.md"
 SUMMARY_DOC = "overview/project-summary.md"
 MODULE_INDEX_DOC = "modules/README.md"
@@ -108,86 +77,24 @@ def filter_doc_root_changes(paths: list[str], doc_root_rel: str | None) -> list[
     return filtered
 
 
-def filter_tooling_only_changes(paths: list[str]) -> list[str]:
-    filtered = []
-    for path in paths:
-        clean = path.replace("\\", "/").strip("/")
-        if "/" not in clean and Path(clean).name in IGNORED_ROOT_TOOLING_FILES:
-            continue
-        filtered.append(clean)
-    return filtered
-
-
-def build_domain_coverage(index_payload: dict) -> dict[str, list[str]]:
-    coverage = {}
+def build_domain_catalog(index_payload: dict) -> tuple[dict[str, list[str]], dict[str, str], dict[str, str]]:
+    coverage: dict[str, list[str]] = {}
+    titles: dict[str, str] = {}
+    docs: dict[str, str] = {}
+    module_docs = dict(index_payload.get("module_docs", {}))
     for domain in index_payload.get("architecture_domains", []):
         domain_id = domain.get("id")
+        if not domain_id:
+            continue
         paths = [item.replace("\\", "/").strip("/") for item in domain.get("paths", []) if item]
-        if domain_id and paths:
+        if paths:
             coverage[domain_id] = paths
-    return coverage
-
-
-def collect_impacted_docs(
-    changed_path: str,
-    module_docs: dict,
-    tracked_paths: list[str],
-    architecture_domains: list[dict] | None = None,
-) -> tuple[list[str], str]:
-    docs = set()
-    reasons = []
-    normalized = changed_path.replace("\\", "/").strip("/")
-    path_parts = normalized.split("/") if normalized else []
-
-    architecture_domains = architecture_domains or []
-    matching_domains = []
-    if architecture_domains:
-        for domain in architecture_domains:
-            doc_rel = module_docs.get(domain.get("id"), domain.get("doc_path"))
-            if not doc_rel:
-                continue
-            for domain_path in domain.get("paths", []):
-                module_prefix = domain_path.replace("\\", "/").strip("/")
-                if normalized == module_prefix or normalized.startswith(module_prefix + "/"):
-                    matching_domains.append((module_prefix.count("/"), doc_rel, domain["title"], module_prefix))
-        matching_domains.sort(reverse=True)
-        if matching_domains:
-            _, doc_rel, domain_title, module_prefix = matching_domains[0]
-            docs.add(doc_rel)
-            reasons.append(f"匹配到功能域 `{domain_title}` 覆盖的路径 `{module_prefix}`。")
-    else:
-        matching_modules = []
-        for module_path, doc_rel in module_docs.items():
-            module_prefix = module_path.replace("\\", "/").strip("/")
-            if normalized == module_prefix or normalized.startswith(module_prefix + "/"):
-                matching_modules.append((module_prefix.count("/"), doc_rel, module_prefix))
-        matching_modules.sort(reverse=True)
-        if matching_modules:
-            _, doc_rel, module_prefix = matching_modules[0]
-            docs.add(doc_rel)
-            reasons.append(f"匹配到已登记的模块路径 `{module_prefix}`。")
-
-    if len(path_parts) == 1:
-        docs.add(STRUCTURE_DOC)
-        reasons.append("触及根级路径，因此需要复查顶层结构。")
-
-    if path_parts and path_parts[0] not in tracked_paths:
-        docs.add(STRUCTURE_DOC)
-        docs.add(MODULE_INDEX_DOC)
-        reasons.append("引入或触及了文档索引尚未跟踪的路径。")
-
-    if path_parts and path_parts[0] == "project-docs":
-        reasons.append("变化已经发生在文档根目录内部。")
-
-    if Path(normalized).name in SUMMARY_TRIGGER_FILES:
-        docs.add(SUMMARY_DOC)
-        reasons.append("触及根级配置文件，可能会改变项目摘要。")
-
-    if not docs:
-        docs.add(SUMMARY_DOC)
-        reasons.append("没有找到直接匹配的功能域，因此需要复查项目总览摘要。")
-
-    return sorted(docs), " ".join(reasons)
+        if domain.get("title"):
+            titles[domain_id] = domain["title"]
+        doc_rel = module_docs.get(domain_id, domain.get("doc_path"))
+        if doc_rel:
+            docs[domain_id] = doc_rel.replace("\\", "/")
+    return coverage, titles, docs
 
 
 def append_change_log(change_log_path: Path, entries: list[dict]) -> None:
@@ -195,9 +102,23 @@ def append_change_log(change_log_path: Path, entries: list[dict]) -> None:
         return
     lines = ["", f"## {utc_now()}", ""]
     for entry in entries:
-        docs_text = ", ".join(entry["docs"])
-        lines.append(f"- `{entry['changed_path']}` -> {docs_text}")
+        changed_paths = entry.get("changed_paths") or ([entry["changed_path"]] if entry.get("changed_path") else [])
+        docs = entry.get("docs", [])
+        paths_text = ", ".join(f"`{path}`" for path in changed_paths) if changed_paths else "`(无变更路径)`"
+        docs_text = ", ".join(docs) if docs else "无正文更新（仅 git 对齐）"
+        strategy = entry.get("update_strategy")
+        scope_level = entry.get("scope_level")
+        lines.append(f"- {paths_text} -> {docs_text}")
+        if strategy or scope_level:
+            detail = "；".join(part for part in [f"策略：{strategy}" if strategy else "", f"层级：{scope_level}" if scope_level else ""] if part)
+            if detail:
+                lines.append(f"  判定：{detail}")
         lines.append(f"  原因：{entry['reason']}")
+        evidence_summary = entry.get("evidence_summary", [])
+        if evidence_summary:
+            lines.append(f"  证据：{' '.join(evidence_summary)}")
+        if entry.get("judgment_prompt"):
+            lines.append(f"  判断提示：{entry['judgment_prompt']}")
     with change_log_path.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
 
@@ -207,6 +128,7 @@ def remember_scope(index_payload: dict, scope: dict, merge_base_sha: str | None 
     git_state["recommended_update_mode"] = scope.get("recommended_update_mode")
     git_state["recommended_reason"] = scope.get("recommended_reason")
     git_state["scope_summary"] = format_scope_summary(scope)
+    git_state["scope_judgment_prompt"] = scope.get("judgment_prompt")
     git_state["merge_base_sha"] = merge_base_sha
     index_payload["git_state"] = git_state
 
@@ -216,6 +138,7 @@ def clear_scope(index_payload: dict, merge_base_sha: str | None = None) -> None:
     git_state["recommended_update_mode"] = None
     git_state["recommended_reason"] = None
     git_state["scope_summary"] = None
+    git_state["scope_judgment_prompt"] = None
     git_state["merge_base_sha"] = merge_base_sha
     index_payload["git_state"] = git_state
 
@@ -243,24 +166,195 @@ def print_diverged_notice(git_state: dict, git_snapshot: dict, scope: dict, merg
     print(f"       原因：{scope['recommended_reason']}")
 
 
-def summary_review_reason(changed_paths: list[str], scope: dict) -> str | None:
-    root_changes = [path for path in changed_paths if "/" not in path]
-    summary_roots = [path for path in root_changes if Path(path).name in SUMMARY_TRIGGER_FILES or Path(path).name in IGNORED_ROOT_TOOLING_FILES]
-    if summary_roots:
-        return f"根级项目入口或关键配置发生变化：{', '.join(summary_roots)}。"
-    if scope.get("new_top_levels"):
-        return f"出现了新的顶层路径：{', '.join(scope['new_top_levels'])}。"
-    return None
+def create_plan_entry(
+    *,
+    changed_paths: list[str],
+    docs: list[str],
+    reason: str,
+    update_strategy: str,
+    scope_level: str,
+    requires_human_review: bool = False,
+    impacted_domain_ids: list[str] | None = None,
+    impacted_domain_titles: list[str] | None = None,
+    evidence_summary: list[str] | None = None,
+    judgment_prompt: str | None = None,
+    scope_snapshot: dict | None = None,
+) -> dict:
+    normalized_paths = [path.replace("\\", "/").strip("/") for path in changed_paths if path]
+    normalized_docs = []
+    seen_docs = set()
+    for doc in docs:
+        clean = doc.replace("\\", "/").strip("/")
+        if clean and clean not in seen_docs:
+            normalized_docs.append(clean)
+            seen_docs.add(clean)
+    entry = {
+        "planned_at": utc_now(),
+        "changed_path": normalized_paths[0] if len(normalized_paths) == 1 else None,
+        "changed_paths": normalized_paths,
+        "docs": normalized_docs,
+        "reason": reason,
+        "update_strategy": update_strategy,
+        "scope_level": scope_level,
+        "requires_human_review": requires_human_review,
+    }
+    if impacted_domain_ids:
+        entry["impacted_domain_ids"] = impacted_domain_ids
+    if impacted_domain_titles:
+        entry["impacted_domain_titles"] = impacted_domain_titles
+    if evidence_summary:
+        entry["evidence_summary"] = evidence_summary
+    if judgment_prompt:
+        entry["judgment_prompt"] = judgment_prompt
+    if scope_snapshot:
+        entry["scope_snapshot"] = scope_snapshot
+    return entry
 
 
-def structure_review_reason(changed_paths: list[str], scope: dict) -> str | None:
+def build_scope_snapshot(scope: dict) -> dict:
+    return {
+        "changed_paths_count": scope.get("changed_paths_count", 0),
+        "top_level_paths": list(scope.get("top_level_paths", [])),
+        "impacted_modules": list(scope.get("impacted_modules", [])),
+        "new_top_levels": list(scope.get("new_top_levels", [])),
+        "critical_root_files": list(scope.get("critical_root_files", [])),
+        "uncovered_paths": list(scope.get("uncovered_paths", [])),
+        "boundary_sensitive_paths": list(scope.get("boundary_sensitive_paths", [])),
+        "low_semantic_risk_paths": list(scope.get("low_semantic_risk_paths", [])),
+    }
+
+
+def build_scope_evidence_summary(changed_paths: list[str], scope: dict, domain_titles: dict[str, str]) -> list[str]:
+    evidence = []
+    if changed_paths:
+        preview = "、".join(f"`{path}`" for path in changed_paths[:5])
+        suffix = " 等路径" if len(changed_paths) > 5 else ""
+        evidence.append(f"本轮实际变化路径包括 {preview}{suffix}。")
     top_level_paths = scope.get("top_level_paths", [])
-    root_dirs = [path for path in changed_paths if "/" not in path and Path(path).suffix == ""]
-    if root_dirs:
-        return f"顶层目录发生变化：{', '.join(root_dirs)}。"
-    if len(top_level_paths) >= 2:
-        return f"变化已跨越多个顶层路径：{', '.join(top_level_paths)}。"
-    return None
+    if top_level_paths:
+        evidence.append(f"变化已覆盖 {len(top_level_paths)} 个顶层路径：{', '.join(f'`{path}`' for path in top_level_paths[:5])}。")
+    critical_root_files = scope.get("critical_root_files", [])
+    if critical_root_files:
+        evidence.append(f"已触及根级上下文文件或关键配置：{', '.join(f'`{name}`' for name in critical_root_files[:5])}。")
+    impacted_modules = scope.get("impacted_modules", [])
+    if impacted_modules:
+        titles = [domain_titles.get(domain_id, domain_id) for domain_id in impacted_modules[:5]]
+        evidence.append(f"当前变化已命中已有功能域映射：{natural_join([f'`{title}`' for title in titles])}。")
+    uncovered_paths = scope.get("uncovered_paths", [])
+    if uncovered_paths:
+        evidence.append(f"仍有未被现有功能域映射覆盖的路径：{', '.join(f'`{path}`' for path in uncovered_paths[:4])}。")
+    new_top_levels = scope.get("new_top_levels", [])
+    if new_top_levels:
+        evidence.append(f"出现了尚未跟踪的新顶层路径：{', '.join(f'`{path}`' for path in new_top_levels[:4])}。")
+    boundary_sensitive_paths = scope.get("boundary_sensitive_paths", [])
+    if boundary_sensitive_paths:
+        evidence.append(f"变化中包含边界敏感入口：{', '.join(f'`{path}`' for path in boundary_sensitive_paths[:4])}。")
+    low_semantic_risk_paths = scope.get("low_semantic_risk_paths", [])
+    if low_semantic_risk_paths and len(low_semantic_risk_paths) == len(changed_paths):
+        evidence.append("所有变化都落在测试、夹具或低语义风险路径中。")
+    return evidence[:6]
+
+
+def natural_join(items: list[str]) -> str:
+    cleaned = [item.strip() for item in items if item and item.strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} 和 {cleaned[1]}"
+    return f"{'、'.join(cleaned[:-1])} 以及 {cleaned[-1]}"
+
+
+def build_summary_review_entry(changed_paths: list[str], scope: dict) -> dict:
+    return create_plan_entry(
+        changed_paths=changed_paths,
+        docs=[SUMMARY_DOC],
+        reason=scope["recommended_reason"],
+        update_strategy="user_review_required",
+        scope_level="summary",
+        requires_human_review=True,
+        evidence_summary=build_scope_evidence_summary(changed_paths, scope, {}),
+        judgment_prompt=scope.get("judgment_prompt"),
+        scope_snapshot=build_scope_snapshot(scope),
+    )
+
+
+def build_structure_entry(changed_paths: list[str], scope: dict, domain_titles: dict[str, str]) -> dict:
+    return create_plan_entry(
+        changed_paths=changed_paths,
+        docs=[STRUCTURE_DOC, MODULE_INDEX_DOC],
+        reason=scope["recommended_reason"],
+        update_strategy=scope["recommended_update_mode"],
+        scope_level="structure",
+        requires_human_review=scope.get("requires_human_review", False),
+        impacted_domain_ids=scope.get("impacted_modules", []),
+        impacted_domain_titles=[domain_titles.get(domain_id, domain_id) for domain_id in scope.get("impacted_modules", [])],
+        evidence_summary=build_scope_evidence_summary(changed_paths, scope, domain_titles),
+        judgment_prompt=scope.get("judgment_prompt"),
+        scope_snapshot=build_scope_snapshot(scope),
+    )
+
+
+def build_module_entries(
+    changed_paths: list[str],
+    scope: dict,
+    domain_titles: dict[str, str],
+    domain_docs: dict[str, str],
+) -> list[dict]:
+    entries = []
+    impacted_ids = scope.get("impacted_modules", [])
+    base_evidence = build_scope_evidence_summary(changed_paths, scope, domain_titles)
+    for domain_id in impacted_ids:
+        doc_rel = domain_docs.get(domain_id)
+        if not doc_rel:
+            continue
+        title = domain_titles.get(domain_id, domain_id)
+        reason = f"{scope['recommended_reason']} 最小受影响功能域为 `{title}`。"
+        evidence_summary = list(base_evidence)
+        evidence_summary.append(f"当前条目下沉到最小受影响功能域 `{title}`。")
+        entries.append(
+            create_plan_entry(
+                changed_paths=changed_paths,
+                docs=[doc_rel],
+                reason=reason,
+                update_strategy="content_update",
+                scope_level="module",
+                impacted_domain_ids=[domain_id],
+                impacted_domain_titles=[title],
+                evidence_summary=evidence_summary[:6],
+                judgment_prompt=scope.get("judgment_prompt"),
+                scope_snapshot=build_scope_snapshot(scope),
+            )
+        )
+    if entries:
+        return entries
+    return [
+        create_plan_entry(
+            changed_paths=changed_paths,
+            docs=[STRUCTURE_DOC, MODULE_INDEX_DOC],
+            reason=f"{scope['recommended_reason']} 当前没有找到可直接复用的功能域文档映射，先复查功能树到代码树映射。",
+            update_strategy="reconcile",
+            scope_level="structure",
+            evidence_summary=base_evidence,
+            judgment_prompt=scope.get("judgment_prompt"),
+            scope_snapshot=build_scope_snapshot(scope),
+        )
+    ]
+
+
+def print_planned_entry(entry: dict) -> None:
+    changed_paths = entry.get("changed_paths") or ([entry["changed_path"]] if entry.get("changed_path") else [])
+    docs = entry.get("docs", [])
+    print(f"[规划] {', '.join(changed_paths) if changed_paths else '(无变更路径)'}")
+    print(f"       策略：{entry.get('update_strategy')} / 层级：{entry.get('scope_level')}")
+    print(f"       文档：{', '.join(docs) if docs else '无正文更新（仅 git 对齐）'}")
+    print(f"       原因：{entry['reason']}")
+    evidence_summary = entry.get("evidence_summary", [])
+    if evidence_summary:
+        print(f"       证据：{' '.join(evidence_summary)}")
+    if entry.get("judgment_prompt"):
+        print(f"       判断提示：{entry['judgment_prompt']}")
 
 
 def main() -> int:
@@ -292,17 +386,14 @@ def main() -> int:
     git_snapshot = capture_git_snapshot(project_root)
     git_state = dict(index_payload.get("git_state", {}))
     alignment_message = None
+    merge_base_sha = None
 
     if args.git_status:
         if not git_snapshot.get("git_available"):
             print("[提示] 当前项目未检测到 git。若要使用 git 感知，请先安装并初始化 git；否则请下沉到全量阅读项目并执行 reconcile。")
         else:
-            changed_paths.extend(
-                filter_tooling_only_changes(
-                    filter_doc_root_changes(working_tree_paths_from_status(git_snapshot.get("status_porcelain", [])), doc_root_rel)
-                )
-            )
-            alignment_message = "本轮依据当前 git 工作区未提交变化规划文档更新。"
+            changed_paths.extend(filter_doc_root_changes(working_tree_paths_from_status(git_snapshot.get("status_porcelain", [])), doc_root_rel))
+            alignment_message = "本轮依据当前 git 工作区未提交变化规划文档维护。"
 
     if args.git_sense:
         relation, sensed_paths, reason, merge_base_sha = explain_alignment(project_root, git_state.get("aligned_head_sha"), git_snapshot)
@@ -335,11 +426,11 @@ def main() -> int:
             index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             print_behind_notice(index_payload.get("git_state", {}), git_snapshot)
             return 0
-        changed_paths.extend(filter_tooling_only_changes(filter_doc_root_changes(sensed_paths, doc_root_rel)))
+        changed_paths.extend(filter_doc_root_changes(sensed_paths, doc_root_rel))
 
     normalized_changed = []
     seen = set()
-    for item in filter_tooling_only_changes(changed_paths):
+    for item in changed_paths:
         clean = item.replace("\\", "/").strip("/")
         if clean and clean not in seen:
             normalized_changed.append(clean)
@@ -353,56 +444,77 @@ def main() -> int:
         print("[提示] 在 summary 确认前，当前只记录 git 状态，不进入正式文档维护规划。")
         return 0
 
-    module_docs = dict(index_payload.get("module_docs", {}))
-    architecture_domains = list(index_payload.get("architecture_domains", []))
-    domain_coverage = build_domain_coverage(index_payload)
+    domain_coverage, domain_titles, domain_docs = build_domain_catalog(index_payload)
     tracked_paths = list(index_payload.get("tracked_paths", []))
     relation = index_payload.get("git_state", {}).get("last_relation")
-    scope = None
-    if normalized_changed:
-        scope = assess_change_scope(normalized_changed, domain_coverage or module_docs, tracked_paths, relation=relation)
-        remember_scope(index_payload, scope, merge_base_sha=index_payload.get("git_state", {}).get("merge_base_sha"))
-        if relation == "diverged":
-            print_diverged_notice(index_payload.get("git_state", {}), git_snapshot, scope, index_payload.get("git_state", {}).get("merge_base_sha"))
-        summary_reason = summary_review_reason(normalized_changed, scope)
-        structure_reason = structure_review_reason(normalized_changed, scope)
-        if summary_reason:
-            mark_summary_stale(index_payload, reason=summary_reason)
-        elif structure_reason:
-            mark_structure_stale(index_payload, reason=structure_reason)
-    else:
-        clear_scope(index_payload, merge_base_sha=index_payload.get("git_state", {}).get("merge_base_sha"))
-    entries = []
-    for changed_path in normalized_changed:
-        docs, reason = collect_impacted_docs(changed_path, module_docs, tracked_paths, architecture_domains)
-        if index_payload.get("summary_state", {}).get("status") == "stale":
-            docs = sorted(set(docs + [SUMMARY_DOC, STRUCTURE_DOC, MODULE_INDEX_DOC]))
-            reason = f"{reason} 项目级 summary 需要重新确认。"
-        elif index_payload.get("structure_state", {}).get("status") == "stale":
-            docs = sorted(set(docs + [STRUCTURE_DOC, MODULE_INDEX_DOC]))
-            reason = f"{reason} 结构责任树需要重新建立。"
-        entries.append(
-            {
-                "planned_at": utc_now(),
-                "changed_path": changed_path,
-                "docs": docs,
-                "reason": reason,
-            }
-        )
 
-    if alignment_message and not entries:
+    if not normalized_changed:
+        clear_scope(index_payload, merge_base_sha=index_payload.get("git_state", {}).get("merge_base_sha"))
+        index_payload["pending_updates"] = []
+        index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, relation=relation)
+        index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if alignment_message:
+            print(f"[提示] {alignment_message}")
+        else:
+            print("[提示] 当前没有发现需要规划的代码变化。")
+        return 0
+
+    legacy_module_units = {
+        key.replace("\\", "/").strip("/"): [key.replace("\\", "/").strip("/")]
+        for key in index_payload.get("module_docs", {})
+        if "/" in str(key)
+    }
+    scope = assess_change_scope(normalized_changed, domain_coverage or legacy_module_units, tracked_paths, relation=relation)
+    remember_scope(index_payload, scope, merge_base_sha=merge_base_sha or index_payload.get("git_state", {}).get("merge_base_sha"))
+
+    if relation == "diverged":
+        print_diverged_notice(index_payload.get("git_state", {}), git_snapshot, scope, index_payload.get("git_state", {}).get("merge_base_sha"))
+
+    entries: list[dict]
+    mode = scope.get("recommended_update_mode")
+    reason = scope.get("recommended_reason")
+
+    if mode == "user_review_required":
+        mark_summary_stale(index_payload, reason=reason)
+        entries = [build_summary_review_entry(normalized_changed, scope)]
+    elif mode == "reconcile" or scope.get("scope_level") == "structure":
+        mark_structure_stale(index_payload, reason=reason)
+        entries = [build_structure_entry(normalized_changed, scope, domain_titles)]
+    elif mode == "git_alignment_only":
+        mark_git_alignment_only(index_payload, git_snapshot)
+        index_payload["pending_updates"] = []
+        index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, align_to_current=True, relation="aligned")
+        index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        log_entry = create_plan_entry(
+            changed_paths=normalized_changed,
+            docs=[],
+            reason=reason,
+            update_strategy="git_alignment_only",
+            scope_level="git",
+            evidence_summary=build_scope_evidence_summary(normalized_changed, scope, domain_titles),
+            judgment_prompt=scope.get("judgment_prompt"),
+            scope_snapshot=build_scope_snapshot(scope),
+        )
+        append_change_log(doc_root / "history" / "change-log.md", [log_entry])
+        print("[完成] 本轮变化被判定为仅需 git 对齐，不改写正文。")
+        print(f"       原因：{reason}")
+        return 0
+    else:
+        mark_modules_stale(index_payload, reason=reason)
+        entries = build_module_entries(normalized_changed, scope, domain_titles, domain_docs)
+
+    if alignment_message:
         print(f"[提示] {alignment_message}")
 
     index_payload["pending_updates"] = entries
     index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, relation=index_payload.get("git_state", {}).get("last_relation"))
+    remember_scope(index_payload, scope, merge_base_sha=merge_base_sha or index_payload.get("git_state", {}).get("merge_base_sha"))
     index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     append_change_log(doc_root / "history" / "change-log.md", entries)
 
     for entry in entries:
-        print(f"[规划] {entry['changed_path']}")
-        print(f"       文档：{', '.join(entry['docs'])}")
-        print(f"       原因：{entry['reason']}")
+        print_planned_entry(entry)
     return 0
 
 

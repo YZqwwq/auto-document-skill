@@ -73,6 +73,7 @@ def build_index(project_root: Path, doc_root: Path) -> dict:
         "architecture_domains": [],
         "module_docs": {},
         "domain_analysis": {},
+        "summary_analysis": {},
         "pending_updates": [],
         "history_files": {
             "analysis_log": "history/analysis-log.md",

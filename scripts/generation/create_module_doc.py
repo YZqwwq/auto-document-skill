@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-创建第二轮模块文档，并将其登记到 index.json。
+生成功能域文档，并将其登记到 index.json。
 
-这一版把模块文档生成器从“模板解释器”降级为“证据打包器”：
-- 脚本负责收集路径事实、候选信号、阅读锚点和待确认问题
-- 最终职责判断保留给后续 agent 与用户共同确认
+当前版本的重点不是“给一个路径生成说明”，而是：
+
+- 优先按功能域生成文档
+- 在文档中解释功能层级、代码落点和阅读入口
+- 将路径输入仅作为解析到功能域的兼容方式
 """
 
 from __future__ import annotations
@@ -16,6 +18,20 @@ from pathlib import Path
 
 from analysis.architecture_domains import domains_by_parent
 from core.git_tracking import capture_git_snapshot, merge_git_state
+from core.path_intelligence import (
+    CODE_SUFFIXES,
+    DEFAULT_OMIT_DIR_NAMES,
+    MARKDOWN_SUFFIXES,
+    STRUCTURED_TEXT_SUFFIXES,
+    build_path_evidence,
+    collect_readme_summary,
+    collect_sample_entries,
+    infer_title_from_path,
+    is_low_semantic_risk_path,
+    normalize_relpath,
+    safe_read_text,
+    summarize_path,
+)
 from core.workflow_state import (
     ensure_workflow_state,
     mark_modules_aligned,
@@ -32,162 +48,8 @@ SKILL_NAME = "auto-document"
 SKILL_VERSION = "0.4.0"
 DOC_SCHEMA_VERSION = "2.0.0"
 README_CANDIDATES = ("README.md", "README.mdx", "readme.md")
-MARKDOWN_SUFFIXES = {".md", ".mdx", ".markdown"}
-IGNORED_ENTRY_NAMES = {"__pycache__", ".ds_store"}
-TEXT_LIKE_SUFFIXES = {
-    ".md",
-    ".mdx",
-    ".markdown",
-    ".txt",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".vue",
-    ".py",
-    ".go",
-    ".java",
-    ".rs",
-    ".sh",
-}
-CODE_LIKE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".py", ".go", ".java", ".rs", ".sh"}
-SOURCE_DIR_HINTS = {"src", "app", "server", "client", "backend", "frontend", "lib", "packages"}
-DOC_DIR_HINTS = {"docs", "doc", "documentation", "developmentlog", "design", "spec", "specs"}
-BUILD_DIR_HINTS = {"out", "dist", "build", ".next"}
-RESOURCE_DIR_HINTS = {"resources", "assets", "public", "static"}
-TEST_DIR_HINTS = {"test", "tests", "__tests__", "spec", "specs"}
-CONFIG_FILE_HINTS = {
-    "package.json",
-    "tsconfig.json",
-    "tsconfig.node.json",
-    "tsconfig.web.json",
-    "pyproject.toml",
-    "cargo.toml",
-    "go.mod",
-    "pom.xml",
-    "electron-builder.yml",
-    "electron-builder.yaml",
-    "vite.config.ts",
-    "vite.config.js",
-    "eslint.config.mjs",
-}
-CORE_TRAIT_HINTS = {
-    "electron": "Electron",
-    "electron-builder": "Electron",
-    "electron-vite": "Electron",
-    "vue": "Vue 3",
-    "@vitejs/plugin-vue": "Vue 3",
-    "react": "React",
-    "next": "Next.js",
-    "fastapi": "FastAPI",
-    "django": "Django",
-    "flask": "Flask",
-}
-STACK_CONFIG_HINTS = {
-    "package.json": "发现 `package.json`，说明仓库至少包含 Node.js / 前端工具链信号。",
-    "pyproject.toml": "发现 `pyproject.toml`，说明仓库可能包含 Python 工具链或 Python 模块。",
-    "Cargo.toml": "发现 `Cargo.toml`，说明仓库可能包含 Rust 模块。",
-    "go.mod": "发现 `go.mod`，说明仓库可能包含 Go 模块。",
-    "pom.xml": "发现 `pom.xml`，说明仓库可能包含 Java / Maven 工具链。",
-}
-SIGNAL_RULES = [
-    {
-        "id": "doc_like",
-        "title": "文档/知识候选",
-        "summary": "路径名、README 或 Markdown 比例提示这里更像说明、设计资料或知识沉淀位置。",
-        "path_names": DOC_DIR_HINTS,
-        "child_names": DOC_DIR_HINTS,
-        "file_suffixes": MARKDOWN_SUFFIXES,
-    },
-    {
-        "id": "source_like",
-        "title": "实现代码候选",
-        "summary": "路径名提示这里更像实现代码聚合位置，但真实入口和边界仍需回到代码确认。",
-        "path_names": SOURCE_DIR_HINTS,
-        "child_names": SOURCE_DIR_HINTS,
-        "file_suffixes": CODE_LIKE_SUFFIXES,
-    },
-    {
-        "id": "runtime_like",
-        "title": "运行时/服务候选",
-        "summary": "命名里出现 main、server、service、runtime、api 等词，提示这里可能接近运行编排或服务实现。",
-        "tokens": {"main", "server", "service", "services", "runtime", "api", "backend"},
-    },
-    {
-        "id": "ui_like",
-        "title": "界面/交互候选",
-        "summary": "命名里出现 renderer、view、page、component、frontend 等词，提示这里可能更靠近界面或交互层。",
-        "tokens": {"renderer", "view", "views", "page", "pages", "component", "components", "frontend", "client", "ui"},
-    },
-    {
-        "id": "shared_like",
-        "title": "共享能力候选",
-        "summary": "命名里出现 share、shared、common、lib 等词，提示这里可能是共享契约、公共能力或通用工具的承载处。",
-        "tokens": {"share", "shared", "common", "core", "lib", "libs"},
-    },
-    {
-        "id": "resource_like",
-        "title": "资源承载候选",
-        "summary": "路径名提示这里更像静态资源、素材或运行时附带资源的承载处。",
-        "path_names": RESOURCE_DIR_HINTS,
-        "child_names": RESOURCE_DIR_HINTS,
-        "tokens": {"assets", "public", "static", "resources"},
-    },
-    {
-        "id": "test_like",
-        "title": "测试/样例候选",
-        "summary": "命名里出现 test、spec、mock、fixture 等词，提示这里更像验证或示例材料，而不是主链实现。",
-        "path_names": TEST_DIR_HINTS,
-        "child_names": TEST_DIR_HINTS,
-        "tokens": {"test", "tests", "spec", "specs", "mock", "mocks", "fixture", "fixtures", "example", "examples"},
-    },
-    {
-        "id": "build_like",
-        "title": "构建产物候选",
-        "summary": "路径名提示这里更像构建输出或生成结果，适合核对，不适合直接当成长期真相来源。",
-        "path_names": BUILD_DIR_HINTS,
-        "child_names": BUILD_DIR_HINTS,
-        "tokens": {"dist", "build", "out", ".next"},
-    },
-    {
-        "id": "config_like",
-        "title": "配置入口候选",
-        "summary": "文件名或后缀提示这里更像工程配置、工具链清单或结构化参数入口。",
-        "file_names": CONFIG_FILE_HINTS,
-        "file_suffixes": {".json", ".yaml", ".yml", ".toml"},
-    },
-]
-ENTRY_NAME_WEIGHTS = {
-    "readme.md": ("说明入口候选", 12, "目录中存在 README，通常适合作为第一层导航入口。"),
-    "readme.mdx": ("说明入口候选", 12, "目录中存在 README，通常适合作为第一层导航入口。"),
-    "index.ts": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担导出或装配职责。"),
-    "index.tsx": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担页面或组件出口职责。"),
-    "index.js": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担导出或装配职责。"),
-    "index.jsx": ("实现入口候选", 9, "文件名像常见聚合入口，适合先核对它是否承担页面或组件出口职责。"),
-    "main.ts": ("主链入口候选", 9, "文件名像主链入口，适合确认这里是否真的是运行起点。"),
-    "main.js": ("主链入口候选", 9, "文件名像主链入口，适合确认这里是否真的是运行起点。"),
-    "package.json": ("工程入口候选", 9, "这个文件通常能暴露脚本、依赖和工具链信息。"),
-}
-ENTRY_TOKEN_HINTS = [
-    ("entry", "入口候选", 5, "名字里出现 entry，可能承担切入或装配角色。"),
-    ("main", "主链入口候选", 5, "名字里出现 main，可能更接近主链起点。"),
-    ("app", "应用入口候选", 5, "名字里出现 app，可能更接近应用级装配入口。"),
-    ("router", "路由/分发候选", 4, "名字里出现 router，可能承担分发或路由职责。"),
-    ("route", "路由/分发候选", 4, "名字里出现 route，可能承担分发或路由职责。"),
-    ("service", "服务锚点候选", 4, "名字里出现 service，适合确认它是否是服务实现锚点。"),
-    ("provider", "能力提供者候选", 4, "名字里出现 provider，适合确认它是否提供上层能力。"),
-    ("client", "调用侧锚点候选", 4, "名字里出现 client，适合确认它是否是对外调用侧。"),
-    ("bridge", "桥接候选", 4, "名字里出现 bridge，适合确认它是否承担跨层桥接。"),
-    ("config", "配置锚点候选", 4, "名字里出现 config，适合确认它会影响哪些工作流。"),
-    ("schema", "结构定义候选", 4, "名字里出现 schema，适合确认这里是否约束数据形态。"),
-    ("types", "结构定义候选", 4, "名字里出现 types，适合确认这里是否约束数据形态。"),
-    ("model", "结构定义候选", 4, "名字里出现 model，适合确认这里是否保存领域模型。"),
-]
-REPRESENTATIVE_SCAN_SUFFIXES = CODE_LIKE_SUFFIXES | {".md", ".mdx", ".json", ".yaml", ".yml", ".toml"}
+IGNORED_ENTRY_NAMES = {"__pycache__", ".ds_store"} | DEFAULT_OMIT_DIR_NAMES
+REPRESENTATIVE_SCAN_SUFFIXES = CODE_SUFFIXES | MARKDOWN_SUFFIXES | STRUCTURED_TEXT_SUFFIXES
 
 
 def format_bullets(items: list[str]) -> str:
@@ -288,28 +150,22 @@ def extract_markdown_summary(text: str) -> str | None:
 def detect_project_traits(project_root: Path | None) -> list[str]:
     if project_root is None:
         return []
-    package_json = project_root / "package.json"
-    if not package_json.exists():
-        return []
-    text = safe_read_text(package_json, max_chars=20000)
-    if not text:
-        return []
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    dependency_names = set(payload.get("dependencies", {}).keys()) | set(payload.get("devDependencies", {}).keys())
     traits = []
-    seen = set()
-    for dependency_name, label in CORE_TRAIT_HINTS.items():
-        if dependency_name in dependency_names and label not in seen:
-            seen.add(label)
-            traits.append(label)
+    if (project_root / "package.json").exists():
+        traits.append("package.json / Node.js 工具链信号")
+    if (project_root / "pyproject.toml").exists():
+        traits.append("pyproject.toml / Python 工具链信号")
+    if (project_root / "Cargo.toml").exists():
+        traits.append("Cargo.toml / Rust 工具链信号")
+    if (project_root / "go.mod").exists():
+        traits.append("go.mod / Go 工具链信号")
+    if (project_root / "pom.xml").exists():
+        traits.append("pom.xml / Java Maven 工具链信号")
     return traits
 
 
 def path_display_name(path_text: str, is_dir: bool | None = None) -> str:
-    clean = path_text.replace("\\", "/").strip("/")
+    clean = normalize_relpath(path_text)
     if not clean:
         return "/"
     name = clean.split("/")[-1]
@@ -329,313 +185,185 @@ def natural_join(items: list[str]) -> str:
     return f"{'、'.join(cleaned[:-1])} 以及 {cleaned[-1]}"
 
 
-def path_name_parts(relative_path: str, target_path: Path) -> list[str]:
-    clean = relative_path.replace("\\", "/").strip("/")
-    parts = [part.lower() for part in clean.split("/") if part]
-    if target_path.name:
-        parts.append(target_path.name.lower())
-    return list(dict.fromkeys(parts))
-
-
-def suffix_label(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in MARKDOWN_SUFFIXES:
-        return "Markdown 文档"
-    if suffix in CODE_LIKE_SUFFIXES:
-        return "代码文件"
-    if suffix in {".json", ".yaml", ".yml", ".toml"}:
-        return "配置或结构化文本"
-    if suffix:
-        return f"`{suffix}` 文件"
-    return "无后缀文件"
-
-
-def sibling_modules(project_root: Path | None, target_path: Path) -> dict[str, str]:
+def sibling_modules(project_root: Path | None, target_path: Path) -> list[str]:
     if project_root is None:
-        return {}
-    top_level = {}
-    for candidate in ("src", "app", "server", "client", "packages"):
-        path = project_root / candidate
-        if path.exists() and path.resolve() != target_path.resolve():
-            top_level["source"] = candidate
-            break
-    for candidate in ("developmentlog", "docs", "doc", "project-docs"):
-        path = project_root / candidate
-        if path.exists() and path.resolve() != target_path.resolve():
-            top_level["docs"] = candidate
-            break
-    for candidate in ("out", "dist", "build"):
-        path = project_root / candidate
-        if path.exists() and path.resolve() != target_path.resolve():
-            top_level["build"] = candidate
-            break
-    for candidate in ("resources", "assets", "public", "static"):
-        path = project_root / candidate
-        if path.exists() and path.resolve() != target_path.resolve():
-            top_level["resources"] = candidate
-            break
-    return top_level
+        return []
+    top_level = []
+    for entry in sorted(project_root.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+        if entry.name.startswith(".") or entry.name.lower() in DEFAULT_OMIT_DIR_NAMES:
+            continue
+        if entry.resolve() == target_path.resolve():
+            continue
+        top_level.append(entry.name + ("/" if entry.is_dir() else ""))
+    return top_level[:8]
 
 
 def collect_stack_hints(project_root: Path | None, target_path: Path, project_traits: list[str]) -> list[str]:
     hints = []
     if project_traits:
-        hints.append(f"从依赖特征看，仓库当前至少暴露出 {natural_join(project_traits)} 等技术栈信号。")
-    if project_root is not None:
-        for name, statement in STACK_CONFIG_HINTS.items():
-            if (project_root / name).exists():
-                hints.append(statement)
+        hints.append(f"从仓库根级配置看，当前至少暴露出 {natural_join(project_traits)}。")
     if target_path.is_dir():
-        for name in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod"):
-            candidate = target_path / name
-            if candidate.exists():
-                hints.append(f"`{target_path.name or '.'}/` 下存在 `{name}`，说明这一块可能自带独立的工具链或子模块边界。")
-    return list(dict.fromkeys(hints))
-
-
-def collect_path_facts(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str], sample_entries: list[str], readme_path: Path | None, readme_summary: str | None) -> list[str]:
-    facts = [
-        f"当前路径是{'文件' if target_path.is_file() else '目录'}，相对路径为 `{relative_path}`。",
-        f"路径深度约为 {max(1, len([part for part in relative_path.split('/') if part]))} 层。",
-    ]
-    if target_path.is_file():
-        facts.append(f"文件类型信号：{suffix_label(target_path)}。")
-        facts.append(f"所在目录为 `{target_path.parent.name or '.'}`。")
-    else:
-        facts.append(f"当前可直接看到 {len(child_dirs)} 个子目录、{len(child_files)} 个文件。")
-        if sample_entries:
-            facts.append(f"首批可见条目包括 {natural_join([f'`{name}`' for name in sample_entries[:6]])}。")
-    if readme_path:
-        facts.append(f"同层存在 `{readme_path.name}`，这通常意味着这里已经有一层本地说明入口。")
-    if readme_summary:
-        facts.append(f"本地 README 摘要信号：{readme_summary}")
-    return facts
-
-
-def _match_rule_basis(rule: dict, relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> list[str]:
-    bases: list[str] = []
-    parts = set(path_name_parts(relative_path, target_path))
-    child_names = {name.lower() for name in child_dirs + child_files}
-    path_name = target_path.name.lower()
-    suffix = target_path.suffix.lower()
-
-    for candidate in rule.get("path_names", set()):
-        if candidate.lower() == path_name or candidate.lower() in parts:
-            bases.append(f"路径名包含 `{candidate}`。")
-            break
-    for candidate in rule.get("child_names", set()):
-        if candidate.lower() in child_names:
-            bases.append(f"子条目中出现 `{candidate}`。")
-            break
-    for token in rule.get("tokens", set()):
-        if any(token in item for item in parts | child_names):
-            bases.append(f"命名里出现 `{token}` 相关信号。")
-            break
-    if target_path.is_file():
-        for candidate in rule.get("file_names", set()):
-            if target_path.name.lower() == candidate.lower():
-                bases.append(f"文件名命中 `{candidate}`。")
+        local_configs = []
+        for child in sorted(target_path.iterdir(), key=lambda item: item.name.lower()):
+            if child.is_file() and child.suffix.lower() in STRUCTURED_TEXT_SUFFIXES:
+                local_configs.append(child.name)
+            if len(local_configs) >= 4:
                 break
-        if suffix and suffix in rule.get("file_suffixes", set()):
-            bases.append(f"文件后缀为 `{suffix}`。")
+        if local_configs:
+            hints.append(f"这一层可见结构化配置文件：{natural_join([f'`{name}`' for name in local_configs])}。")
+    return hints
+
+
+def generic_path_kind(target_path: Path, readme_summary: str | None, child_dirs: list[str], child_files: list[str]) -> str:
+    if target_path.is_file():
+        suffix = target_path.suffix.lower()
+        if suffix in CODE_SUFFIXES:
+            return "code_evidence"
+        if suffix in MARKDOWN_SUFFIXES:
+            return "doc_evidence"
+        if suffix in STRUCTURED_TEXT_SUFFIXES:
+            return "config_evidence"
+        return "file_evidence"
+    if readme_summary and child_files:
+        return "topic_directory"
+    if child_dirs and child_files:
+        return "mixed_directory"
+    if child_dirs:
+        return "container_directory"
+    if child_files:
+        return "implementation_directory"
+    return "generic_directory"
+
+
+def collect_context_observations(
+    relative_path: str,
+    target_path: Path,
+    child_dirs: list[str],
+    child_files: list[str],
+    readme_summary: str | None,
+) -> list[str]:
+    observations = build_path_evidence(relative_path, target_path)
+    if readme_summary:
+        observations.append(f"本地 README 摘要：{readme_summary}")
+    if child_dirs:
+        observations.append(f"当前直接可见的子目录包括 {natural_join([f'`{name}`' for name in child_dirs[:5]])}。")
+    if child_files:
+        observations.append(f"当前直接可见的文件包括 {natural_join([f'`{name}`' for name in child_files[:5]])}。")
+    return observations
+
+
+def describe_reading_candidate(path: Path, rel_path: str, *, is_root_readme: bool = False) -> tuple[str, list[str], int]:
+    score = 0
+    reasons = []
+    if is_root_readme:
+        score += 10
+        reasons.append("这里有同层 README，可以先用来建立局部语境。")
+    if path.is_dir():
+        score += 5
+        reasons.append("这是一个子目录，适合作为继续下钻的候选入口。")
     else:
-        if child_files:
-            markdown_count = sum(1 for name in child_files if Path(name).suffix.lower() in MARKDOWN_SUFFIXES)
-            code_count = sum(1 for name in child_files if Path(name).suffix.lower() in CODE_LIKE_SUFFIXES)
-            if rule["id"] == "doc_like" and markdown_count >= max(2, len(child_files) // 2):
-                bases.append("当前目录内 Markdown 文件占比较高。")
-            if rule["id"] == "doc_like" and any(name.lower() in {candidate.lower() for candidate in README_CANDIDATES} for name in child_files):
-                bases.append("当前目录内存在 README。")
-            if rule["id"] == "source_like" and code_count >= max(1, len(child_files) // 2):
-                bases.append("当前目录内可见代码文件占比较高。")
-    return bases
+        suffix = path.suffix.lower()
+        if suffix in CODE_SUFFIXES:
+            score += 6
+            reasons.append("这是一个代码文件，可以继续确认真实实现。")
+        elif suffix in MARKDOWN_SUFFIXES:
+            score += 5
+            reasons.append("这是一个说明文档，可以先建立上下文。")
+        elif suffix in STRUCTURED_TEXT_SUFFIXES:
+            score += 4
+            reasons.append("这是一个结构化配置文件，可以帮助确认边界与参数。")
+        else:
+            score += 2
+            reasons.append("这是一个可见文件，仍值得继续核对。")
+    if is_low_semantic_risk_path(rel_path):
+        score -= 4
+        reasons.append("这条路径更像测试或样例材料，优先级应低于主链证据。")
+    return ("继续阅读候选", reasons, score)
 
 
-def collect_module_signals(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> list[dict]:
-    signals = []
-    for rule in SIGNAL_RULES:
-        basis = _match_rule_basis(rule, relative_path, target_path, child_dirs, child_files)
-        if not basis:
-            continue
-        strength = min(5, max(1, len(basis)))
-        signals.append(
-            {
-                "id": rule["id"],
-                "title": rule["title"],
-                "summary": rule["summary"],
-                "basis": basis,
-                "signal_type": "module_candidate",
-                "signal_strength": strength,
-                "candidate": True,
-            }
-        )
-    signals.sort(key=lambda item: (-item["signal_strength"], item["title"]))
-    return signals
-
-
-def detect_module_kind(relative_path: str, target_path: Path, child_dirs: list[str], child_files: list[str]) -> str:
-    signals = collect_module_signals(relative_path, target_path, child_dirs, child_files)
-    if signals:
-        return signals[0]["id"]
-    return "generic_file" if target_path.is_file() else "generic_directory"
-
-
-def score_entry_candidate(name: str, is_dir: bool) -> tuple[int, str, list[str]]:
-    score = 1
-    reasons: list[str] = []
-    clean = name.rstrip("/")
-    lower_name = clean.lower()
-
-    direct = ENTRY_NAME_WEIGHTS.get(lower_name)
-    if direct:
-        label, delta, reason = direct
-        score += delta
-        reasons.append(reason)
-    else:
-        label = "继续核对候选"
-
-    for token, token_label, delta, reason in ENTRY_TOKEN_HINTS:
-        if token in lower_name:
-            label = token_label
-            score += delta
-            reasons.append(reason)
-
-    suffix = Path(clean).suffix.lower()
-    if is_dir:
-        score += 2
-        reasons.append("这是一个子目录，通常可以继续向下核对职责分层。")
-    elif suffix in CODE_LIKE_SUFFIXES:
-        score += 3
-        reasons.append("这是一个代码文件，适合继续确认真实实现。")
-    elif suffix in MARKDOWN_SUFFIXES:
-        score += 2
-        reasons.append("这是一个说明文档，适合先建立上下文。")
-    elif suffix in {".json", ".yaml", ".yml", ".toml"}:
-        score += 2
-        reasons.append("这是一个配置或结构化文本文件，适合确认工具链与参数边界。")
-
-    if not reasons:
-        reasons.append("这个条目位于当前路径的第一层，适合作为继续核对的起点。")
-    return score, label, reasons
-
-
-def collect_entry_candidates(relative_path: str, target_path: Path, sample_entries: list[str], readme_path: Path | None) -> list[dict]:
+def collect_entry_candidates(relative_path: str, target_path: Path, readme_path: Path | None) -> list[dict]:
     candidates: list[dict] = []
     seen: set[str] = set()
 
-    def add_candidate(display_name: str, rel_path: str, is_dir: bool) -> None:
-        clean_rel = rel_path.replace("\\", "/").strip("/")
+    def add_candidate(path: Path, rel_path: str, *, is_root_readme: bool = False) -> None:
+        clean_rel = normalize_relpath(rel_path)
         if not clean_rel or clean_rel in seen:
             return
         seen.add(clean_rel)
-        score, label, reasons = score_entry_candidate(display_name, is_dir)
+        label, reasons, score = describe_reading_candidate(path, clean_rel, is_root_readme=is_root_readme)
         candidates.append(
             {
                 "path": clean_rel,
-                "name": display_name,
+                "name": path.name,
                 "label": label,
                 "basis": reasons,
                 "score": score,
-                "is_dir": is_dir,
+                "is_dir": path.is_dir(),
             }
         )
 
     if target_path.is_file():
-        add_candidate(target_path.name, relative_path, False)
+        add_candidate(target_path, relative_path)
     else:
         if readme_path:
             readme_rel = (Path(relative_path) / readme_path.name).as_posix() if relative_path else readme_path.name
-            add_candidate(readme_path.name, readme_rel, False)
-        for entry in sample_entries[:8]:
-            is_dir = entry.endswith("/")
-            display_name = entry.rstrip("/")
-            rel_path = (Path(relative_path) / display_name).as_posix() if relative_path else display_name
-            add_candidate(display_name, rel_path, is_dir)
+            add_candidate(readme_path, readme_rel, is_root_readme=True)
+        for child in sorted(target_path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if child.name.lower() in IGNORED_ENTRY_NAMES or child.name.startswith("."):
+                continue
+            rel_path = (Path(relative_path) / child.name).as_posix() if relative_path else child.name
+            add_candidate(child, rel_path)
+            if len(candidates) >= 12:
+                break
 
     candidates.sort(key=lambda item: (-item["score"], item["path"]))
     return candidates[:8]
 
 
-def infer_relationship_hints(siblings: dict[str, str], candidate_signals: list[dict]) -> list[str]:
-    hints = []
-    signal_ids = {item["id"] for item in candidate_signals}
-    if "source" in siblings and "docs" in siblings:
-        hints.append(f"仓库同时存在 `{siblings['source']}/` 与 `{siblings['docs']}/`，当前路径可能处在“文档解释”和“真实实现”之间的某个连接点。")
-    elif "source" in siblings:
-        hints.append(f"仓库存在 `{siblings['source']}/`，需要时应回到那里核对真实实现与调用链。")
-    if "build" in siblings and "build_like" not in signal_ids:
-        hints.append(f"仓库存在 `{siblings['build']}/`，若当前路径与构建输出有关，建议核对它与源码路径是否一致。")
-    if "resources" in siblings and "resource_like" not in signal_ids:
-        hints.append(f"仓库存在 `{siblings['resources']}/`，若当前路径涉及素材或静态资源，应继续确认引用关系。")
-    if not hints:
-        hints.append("当前路径与相邻模块的关系还不稳定，建议结合上一级目录与引用链一起确认。")
-    return hints
-
-
-def infer_open_questions(relative_path: str, target_path: Path, candidate_signals: list[dict], readme_summary: str | None) -> list[str]:
+def infer_open_questions(relative_path: str, target_path: Path, readme_summary: str | None) -> list[str]:
     questions = [
-        f"`{relative_path}` 在当前 summary 语义里到底属于“稳定职责边界”还是“暂时的目录组织”?",
+        f"`{relative_path}` 在当前 summary 语义里到底代表稳定职责边界，还是暂时的实现组织?",
     ]
-    signal_ids = {item["id"] for item in candidate_signals}
     if target_path.is_dir():
-        questions.append("这里真正的阅读起点是 README、入口文件，还是某个更深层子目录?")
+        questions.append("这里真正的阅读起点应该是同层 README、局部入口文件，还是某个更深层的专题子目录?")
     else:
-        questions.append("这个文件是主入口、辅助实现，还是仅仅因为命名显眼才被看到?")
-    if "doc_like" in signal_ids and "source_like" in signal_ids:
-        questions.append("这里同时出现文档和实现信号，后续文档里应把它写成“说明层”还是“实现层”?")
-    if "build_like" in signal_ids:
-        questions.append("这里是应该长期维护的源码面，还是一次构建后生成的结果面?")
-    if "config_like" in signal_ids:
-        questions.append("这里影响的是整个项目、某个子模块，还是只影响局部工具链?")
+        questions.append("这个文件是关键入口、支撑实现，还是只是一条辅助证据?")
     if readme_summary:
-        questions.append("README 的表述和当前代码结构是否一致，是否需要由用户补充长期目标而不是只描述当前状态?")
-    return questions[:6]
-
-
-def infer_update_conditions(relative_path: str, target_path: Path, candidate_signals: list[dict]) -> list[str]:
-    items = [
-        f"`{relative_path}` 下的目录结构、入口文件或关键说明发生实质变化时。",
-        "当前文档里列出的候选入口已经不再适合作为第一阅读顺序时。",
-    ]
-    signal_ids = {item["id"] for item in candidate_signals}
-    if "doc_like" in signal_ids:
-        items.append("README 或专题说明已经不能反映当前代码真相时。")
-    if "config_like" in signal_ids:
-        items.append("工具链、脚本命令或关键配置文件发生变化时。")
-    if target_path.is_dir():
-        items.append("当前路径内部职责被拆分、合并或迁移到其他目录时。")
-    return items
+        questions.append("本地 README 的表述是否已经落后于当前代码，或者只代表短期实现状态?")
+    questions.append("这一层和它的上层功能域之间，边界是稳定的还是仍可能继续拆分?")
+    return questions[:5]
 
 
 def build_context(relative_path: str, target_path: Path, project_root: Path | None = None) -> dict:
-    sample_entries = collect_sample_entries(target_path)
     child_dirs, child_files = collect_child_names(target_path)
     readme_path = find_local_readme(target_path)
-    readme_summary = extract_markdown_summary(safe_read_text(readme_path) or "") if readme_path else None
+    readme_summary = collect_readme_summary(target_path)
     project_traits = detect_project_traits(project_root)
-    candidate_signals = collect_module_signals(relative_path, target_path, child_dirs, child_files)
+    observations = collect_context_observations(relative_path, target_path, child_dirs, child_files, readme_summary)
+    entry_candidates = collect_entry_candidates(relative_path, target_path, readme_path)
+    path_summary = summarize_path(relative_path, target_path)
     return {
         "relative_path": relative_path,
         "target_path": target_path,
         "path_type": "文件" if target_path.is_file() else "目录",
-        "sample_entries": sample_entries,
+        "sample_entries": collect_sample_entries(target_path),
         "child_dirs": child_dirs,
         "child_files": child_files,
         "readme_path": readme_path,
         "readme_summary": readme_summary,
         "project_traits": project_traits,
-        "kind": candidate_signals[0]["id"] if candidate_signals else detect_module_kind(relative_path, target_path, child_dirs, child_files),
+        "kind": generic_path_kind(target_path, readme_summary, child_dirs, child_files),
         "siblings": sibling_modules(project_root, target_path),
-        "path_facts": collect_path_facts(relative_path, target_path, child_dirs, child_files, sample_entries, readme_path, readme_summary),
-        "candidate_signals": candidate_signals,
+        "path_facts": observations,
+        "path_summary": path_summary,
         "stack_hints": collect_stack_hints(project_root, target_path, project_traits),
-        "entry_candidates": collect_entry_candidates(relative_path, target_path, sample_entries, readme_path),
+        "entry_candidates": entry_candidates,
+        "judgment_prompt": (
+            f"请基于 `{relative_path}` 的路径证据、本地 README、子目录/子文件分布、"
+            "以及它在上层功能树中的位置，判断它在当前项目里承担什么职责、边界是否稳定、"
+            "以及应该从哪里开始阅读。"
+        ),
     }
-
-
-def render_signal(signal: dict) -> str:
-    basis_text = "；".join(signal.get("basis", [])) if signal.get("basis") else "缺少明确依据"
-    return f"`{signal['title']}`：{signal['summary']} 依据：{basis_text}"
 
 
 def render_entry_candidate(entry: dict) -> str:
@@ -646,59 +374,11 @@ def render_entry_candidate(entry: dict) -> str:
 
 def context_positioning(context: dict) -> str:
     relative_path = context["relative_path"]
-    signal_titles = [f"“{signal['title']}”" for signal in context["candidate_signals"][:2]]
-    if signal_titles:
-        return (
-            f"`{relative_path}` 当前主要暴露出 {natural_join(signal_titles)} 等候选信号。"
-            "这更像一个需要继续核对的证据入口，而不是已经被脚本确认的职责结论。"
-        )
-    if context["target_path"].is_file():
-        return f"`{relative_path}` 当前还没有明显的类型信号，它更像一个需要结合上下文再判断的单文件入口。"
-    return f"`{relative_path}` 当前还没有明显的职责信号，它更像一个需要结合上层 summary 再判断的目录容器。"
-
-
-def render_module_doc(relative_path: str, target_path: Path, project_root: Path | None = None) -> str:
-    context = build_context(relative_path, target_path, project_root)
-    path_type = "文件" if target_path.is_file() else "目录"
-    return f"""# 模块：{relative_path}
-
-## 当前证据定位
-
-{context_positioning(context)}
-
-## 范围
-
-- 路径：`{relative_path}`
-- 类型：`{path_type}`
-
-## 可直接观察到的事实
-
-{format_bullets(context["path_facts"])}
-
-## 技术栈线索
-
-{format_bullets(context["stack_hints"])}
-
-## 候选信号
-
-{format_bullets([render_signal(item) for item in context["candidate_signals"]]) if context["candidate_signals"] else "- 暂无明显信号"}
-
-## 优先核对的入口或条目
-
-{format_bullets([render_entry_candidate(item) for item in context["entry_candidates"]]) if context["entry_candidates"] else "- 暂无可用入口"}
-
-## 相邻路径提示
-
-{format_bullets(infer_relationship_hints(context["siblings"], context["candidate_signals"]))}
-
-## 继续确认的问题
-
-{format_bullets(infer_open_questions(relative_path, target_path, context["candidate_signals"], context["readme_summary"]))}
-
-## 何时更新本文件
-
-{format_bullets(infer_update_conditions(relative_path, target_path, context["candidate_signals"]))}
-"""
+    summary = context.get("path_summary") or summarize_path(relative_path, context["target_path"])
+    return (
+        f"`{relative_path}`：{summary} "
+        "这是一条用于帮助 AI 和维护者继续判断的证据落点，而不是已经被系统锁定的最终职责结论。"
+    )
 
 
 def format_domain_path_entry(context: dict) -> str:
@@ -774,15 +454,13 @@ def describe_domain_file_role(path: Path) -> str:
         return "继续下钻候选目录"
     if "readme" in lower_name:
         return "说明入口候选"
-    if any(token in lower_name for token in ("index", "main", "entry", "app")):
-        return "实现入口候选"
-    if any(token in lower_name for token in ("config", "setting", "settings")) or suffix in {".json", ".yaml", ".yml", ".toml"}:
+    if suffix in STRUCTURED_TEXT_SUFFIXES:
         return "配置锚点候选"
     if suffix in MARKDOWN_SUFFIXES:
         return "文档补充候选"
-    if any(token in lower_name for token in ("test", "spec", "mock", "fixture")):
+    if is_low_semantic_risk_path(path.as_posix()):
         return "测试或样例候选"
-    if suffix in CODE_LIKE_SUFFIXES:
+    if suffix in CODE_SUFFIXES:
         return "继续核对的实现文件"
     return "继续核对的关键文件"
 
@@ -874,21 +552,16 @@ def score_domain_file(path: Path, domain_id: str) -> int:
     score = 1
     lower_name = path.name.lower()
     if "readme" in lower_name:
-        score += 10
-    if any(token in lower_name for token in ("index", "main", "entry", "app")):
-        score += 8
-    if any(token in lower_name for token in ("config", "schema", "types", "model", "router", "route", "service", "provider", "client", "bridge")):
+        score += 6
+    if is_low_semantic_risk_path(path.as_posix()):
+        score -= 5
+    if path.suffix.lower() in CODE_SUFFIXES:
         score += 4
-    if any(token in lower_name for token in ("test", "spec", "mock", "fixture")):
-        score -= 4
-    if path.suffix.lower() in CODE_LIKE_SUFFIXES:
-        score += 3
     elif path.suffix.lower() in MARKDOWN_SUFFIXES:
         score += 2
-    elif path.suffix.lower() in {".json", ".yaml", ".yml", ".toml"}:
+    elif path.suffix.lower() in STRUCTURED_TEXT_SUFFIXES:
         score += 2
-    if len(path.parts) <= 6:
-        score += 1
+    score += max(0, 6 - len(path.parts))
     return score
 
 
@@ -923,33 +596,22 @@ def collect_representative_domain_files(domain: dict, project_root: Path, limit:
     return [path for _, path in ranked[:limit]]
 
 
-def aggregate_context_signals(contexts: list[dict], limit: int = 8) -> list[str]:
-    grouped: dict[str, dict] = {}
+def aggregate_context_observations(contexts: list[dict], limit: int = 8) -> list[str]:
+    observations = []
     for context in contexts:
-        label = f"`{path_display_name(context['relative_path'], context['target_path'].is_dir())}`"
-        for signal in context.get("candidate_signals", []):
-            bucket = grouped.setdefault(
-                signal["id"],
-                {
-                    "title": signal["title"],
-                    "summary": signal["summary"],
-                    "paths": [],
-                    "basis": [],
-                    "strength": 0,
-                },
-            )
-            bucket["paths"].append(label)
-            bucket["basis"].extend(signal.get("basis", []))
-            bucket["strength"] = max(bucket["strength"], signal.get("signal_strength", 1))
-    ranked = sorted(grouped.values(), key=lambda item: (-len(item["paths"]), -item["strength"], item["title"]))
-    lines = []
-    for item in ranked[:limit]:
-        unique_paths = list(dict.fromkeys(item["paths"]))[:3]
-        unique_basis = list(dict.fromkeys(item["basis"]))[:2]
-        path_text = natural_join(unique_paths)
-        basis_text = "；".join(unique_basis) if unique_basis else "暂无更具体依据"
-        lines.append(f"`{item['title']}`：主要出现在 {path_text}。{item['summary']} 依据：{basis_text}")
-    return lines
+        observations.append(context_positioning(context))
+        observations.extend(context.get("path_facts", [])[:2])
+        if len(observations) >= limit:
+            break
+    deduped = []
+    seen = set()
+    for item in observations:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+        if len(deduped) >= limit:
+            break
+    return deduped
 
 
 def collect_domain_open_questions(domain: dict, contexts: list[dict], child_domains: list[dict]) -> list[str]:
@@ -959,7 +621,7 @@ def collect_domain_open_questions(domain: dict, contexts: list[dict], child_doma
     if child_domains:
         questions.append("下级专题域的拆分是否真的按职责边界完成，还是只是沿着目录树继续切?")
     elif contexts:
-        questions.append("这几个覆盖路径之间到底谁是主链，谁只是辅助或补充材料?")
+        questions.append("这几个代码落点之间到底谁是主链，谁只是辅助或补充材料?")
     if any(context.get("readme_summary") for context in contexts):
         questions.append("README 里的说法是否只是当前状态描述，还是能代表项目最终希望形成的长期结构?")
     return questions[:5]
@@ -974,9 +636,9 @@ def collect_domain_reading_items(domain: dict, contexts: list[dict], child_domai
         for context in contexts[:3]:
             entries = context.get("entry_candidates", [])
             if entries:
-                items.append(f"先从 `{entries[0]['path']}` 开始核对，再沿着相邻目录或调用链继续向下读。")
+                items.append(f"先从 `{entries[0]['path']}` 对应的代码入口开始核对，再沿着相邻目录或调用链继续向下读。")
             else:
-                items.append(f"先从 `{context['relative_path']}` 所在路径开始，再确认实际入口文件。")
+                items.append(f"先从 `{context['relative_path']}` 这处代码落点开始，再确认实际入口文件。")
     if not items:
         items.append("当前还缺少稳定阅读顺序，建议先回到 summary 和 structure 重新确认这一层的定位。")
     return items[:6]
@@ -990,7 +652,7 @@ def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) ->
     contexts = [build_context(path, (project_root / path).resolve(), project_root) for path in domain.get("paths", []) if (project_root / path).exists()]
     hierarchy_map = render_local_domain_hierarchy(domain, all_domains)
     coverage_list = render_compact_context_section(contexts)
-    signal_items = aggregate_context_signals(contexts)
+    evidence_items = aggregate_context_observations(contexts)
     analysis = {
         "id": domain["id"],
         "title": title,
@@ -1005,14 +667,16 @@ def analyze_domain(domain: dict, all_domains: list[dict], project_root: Path) ->
             {
                 "path": context["relative_path"],
                 "summary": context_positioning(context),
-                "signals": [signal["title"] for signal in context.get("candidate_signals", [])[:3]],
+                "observations": context.get("path_facts", [])[:3],
             }
             for context in contexts
         ],
         "coverage_list": coverage_list,
-        "signal_items": signal_items,
+        "evidence_items": evidence_items,
         "reading_items": collect_domain_reading_items(domain, contexts, child_domains, current_doc_rel),
         "open_questions": collect_domain_open_questions(domain, contexts, child_domains),
+        "judgment_prompt": domain.get("judgment_prompt"),
+        "context_prompts": [context.get("judgment_prompt") for context in contexts if context.get("judgment_prompt")],
     }
     if child_domains:
         analysis["doc_kind"] = "root"
@@ -1075,9 +739,9 @@ def render_domain_doc_from_analysis(analysis: dict) -> str:
 
 {analysis.get('coverage_list', '- 暂无路径')}
 
-## 这一层暴露出的候选信号
+## 这一层的证据观察
 
-{format_bullets(analysis.get('signal_items', []))}
+{format_bullets(analysis.get('evidence_items', []))}
 
 ## 阅读建议
 
@@ -1102,9 +766,9 @@ def render_domain_doc_from_analysis(analysis: dict) -> str:
 
 {format_bullets(analysis.get('evidence_chain', []))}
 
-## 候选信号
+## 证据观察
 
-{format_bullets(analysis.get('signal_items', []))}
+{format_bullets(analysis.get('evidence_items', []))}
 
 ## 相关实现路径
 
@@ -1195,7 +859,7 @@ def update_modules_readme(doc_root: Path, module_docs: dict, architecture_domain
     lines = [
         "# 模块文档",
         "",
-        "这里按项目的功能架构列出第一层功能域，以及已经单独拆出的第二层专题域。",
+        "这里按项目的功能树列出第一层功能域，以及已经单独拆出的下级功能域。",
         "",
         "## 当前功能架构",
         "",
@@ -1204,11 +868,45 @@ def update_modules_readme(doc_root: Path, module_docs: dict, architecture_domain
     (doc_root / "modules" / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def resolve_domain_target(target: str, architecture_domains: list[dict], project_root: Path) -> tuple[dict, str]:
+    cleaned = target.replace("\\", "/").strip("/")
+    domain_lookup = {domain["id"]: domain for domain in architecture_domains}
+    if cleaned in domain_lookup:
+        return domain_lookup[cleaned], "domain_id"
+
+    matches: list[tuple[int, int, dict]] = []
+    for domain in architecture_domains:
+        for domain_path in domain.get("paths", []):
+            normalized_path = domain_path.replace("\\", "/").strip("/")
+            if not normalized_path:
+                continue
+            if cleaned == normalized_path or cleaned.startswith(normalized_path + "/"):
+                matches.append((normalized_path.count("/"), int(domain.get("level", 1)), domain))
+            elif normalized_path.startswith(cleaned + "/"):
+                matches.append((normalized_path.count("/"), int(domain.get("level", 1)), domain))
+    if matches:
+        matches.sort(key=lambda item: (item[0], item[1], item[2]["id"]), reverse=True)
+        return matches[0][2], "path_resolved"
+
+    candidate_path = (project_root / cleaned).resolve()
+    if candidate_path.exists():
+        raise FileNotFoundError(
+            f"目标 `{cleaned}` 当前存在，但还没有映射到稳定功能域。"
+            "请先重新扫描功能树，或改为传入明确的功能域 ID。"
+        )
+    raise FileNotFoundError(f"未找到功能域或路径：{cleaned}")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="为重要项目路径创建模块文档。")
+    parser = argparse.ArgumentParser(description="为功能域创建模块文档。")
     parser.add_argument("--project-root", required=True, help="仓库根目录。")
     parser.add_argument("--doc-root", help="文档根目录。默认使用 <project-root>/project-docs。")
-    parser.add_argument("--target", action="append", required=True, help="需要生成文档的项目相对路径。")
+    parser.add_argument(
+        "--target",
+        action="append",
+        required=True,
+        help="需要生成文档的功能域 ID。兼容传入路径，但路径会先解析到最接近的功能域。",
+    )
     parser.add_argument("--force", action="store_true", help="如果模块文档已存在，则强制重写。")
     args = parser.parse_args()
 
@@ -1219,11 +917,11 @@ def main() -> int:
 
     if not summary_is_confirmed(index_payload):
         print(f"[阻止] {summary_gate_message(index_payload)}")
-        print("[下一步] 请先确认 `overview/project-summary.md`。")
+        print("[下一步] 请先让 `overview/project-summary.md` 成为可继续的项目基线。")
         return 0
     if not structure_is_aligned(index_payload):
         print(f"[阻止] {structure_gate_message(index_payload)}")
-        print("[下一步] 请先建立并对齐 `overview/project-structure.md`。")
+        print("[下一步] 请先建立并对齐功能树与代码树映射文档 `overview/project-structure.md`。")
         return 0
 
     index_payload["skill_name"] = SKILL_NAME
@@ -1232,37 +930,47 @@ def main() -> int:
     mark_modules_drafted(index_payload)
     module_docs = dict(index_payload.get("module_docs", {}))
     generated_docs = set(index_payload.get("generated_docs", []))
+    architecture_domains = list(index_payload.get("architecture_domains", []))
+    if not architecture_domains:
+        raise RuntimeError("当前索引中还没有稳定功能域。请先运行 `scan_project_tree.py` 建立功能树与代码映射。")
+
     created = []
+    resolved_messages = []
+    selected_domains: dict[str, dict] = {}
 
     for target in args.target:
-        rel = target.replace("\\", "/").strip("/")
-        target_path = (project_root / rel).resolve()
-        if not target_path.exists():
-            raise FileNotFoundError(f"目标路径不存在：{target_path}")
-        doc_rel = f"modules/{slugify(rel)}.md"
+        domain, resolved_by = resolve_domain_target(target, architecture_domains, project_root)
+        selected_domains[domain["id"]] = domain
+        doc_rel = domain.get("doc_path") or f"modules/{slugify(domain['id'])}.md"
         doc_path = doc_root / doc_rel
         if not doc_path.exists() or args.force:
-            doc_path.write_text(render_module_doc(rel, target_path, project_root), encoding="utf-8")
+            doc_path.parent.mkdir(parents=True, exist_ok=True)
+            doc_path.write_text(render_domain_doc(domain, architecture_domains, project_root), encoding="utf-8")
             created.append(doc_rel)
-        module_docs[rel] = doc_rel
+        module_docs[domain["id"]] = doc_rel
         generated_docs.add(doc_rel)
+        if resolved_by != "domain_id":
+            resolved_messages.append(f"`{target}` -> `{domain['title']}`")
 
     index_payload["module_docs"] = dict(sorted(module_docs.items()))
     index_payload["generated_docs"] = sorted(generated_docs)
     tracked_paths = set(index_payload.get("tracked_paths", []))
-    tracked_paths.update(module_docs.keys())
+    for domain in selected_domains.values():
+        tracked_paths.update(domain.get("paths", []))
     index_payload["tracked_paths"] = sorted(tracked_paths)
     git_snapshot = capture_git_snapshot(project_root)
     mark_modules_aligned(index_payload, git_snapshot)
     index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, align_to_current=True)
     index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    update_modules_readme(doc_root, module_docs, list(index_payload.get("architecture_domains", [])))
+    update_modules_readme(doc_root, module_docs, architecture_domains)
 
     if created:
         print(f"[完成] 已创建模块文档：{', '.join(created)}")
     else:
         print("[跳过] 没有模块文档被重写。")
+    if resolved_messages:
+        print(f"[提示] 路径输入已解析到功能域：{'; '.join(resolved_messages)}")
     return 0
 
 

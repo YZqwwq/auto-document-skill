@@ -24,10 +24,14 @@ from core.workflow_state import (
 )
 from generation.create_module_doc import (
     analyze_domain,
-    detect_project_traits,
     normalize_doc_root,
     render_domain_doc_from_analysis,
     update_modules_readme,
+)
+from summary.draft_project_summary import (
+    build_summary_analysis_cache,
+    collect_summary_evidence,
+    render_summary,
 )
 
 
@@ -59,216 +63,15 @@ def merge_targets(preferred: list[str], fallback: list[str]) -> list[str]:
     return merged
 
 
-def extract_repo_summary(project_root: Path) -> str | None:
-    for name in ("README.md", "readme.md", "README.mdx"):
-        candidate = project_root / name
-        if not candidate.exists():
-            continue
-        text = candidate.read_text(encoding="utf-8", errors="ignore")
-        lines = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("- [") or line.startswith("* ["):
-                continue
-            lowered = line.lower()
-            if lowered.startswith("## recommended ide setup"):
-                break
-            if lowered.startswith("## project setup"):
-                break
-            if lowered.startswith("### install"):
-                break
-            if lowered.startswith("```"):
-                break
-            lines.append(line)
-            if len(" ".join(lines)) >= 180:
-                break
-        summary = " ".join(lines).strip()
-        if summary:
-            return summary[:220].rstrip(" .") + ("。" if not summary.endswith(("。", ".", "！", "？")) else "")
-    return None
-
-
-def parse_markdown_sections(path: Path) -> dict[str, list[str]]:
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.rstrip()
-        if line.startswith("## "):
-            current = line[3:].strip()
-            sections.setdefault(current, [])
-            continue
-        if current is not None:
-            sections[current].append(line)
-    return sections
-
-
-def extract_section_summary(lines: list[str], *, max_items: int = 2) -> list[str]:
-    items = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("- "):
-            items.append(stripped[2:].strip())
-        elif not stripped.startswith("#"):
-            items.append(stripped)
-        if len(items) >= max_items:
-            break
-    return items
-
-
-def normalize_statement(text: str) -> str:
-    value = text.strip()
-    value = value.removeprefix("负责").removeprefix("这是一个以").strip()
-    value = value.rstrip("。.!！?？")
-    return value
-
-
-def natural_join(items: list[str]) -> str:
-    cleaned = [item.strip() for item in items if item and item.strip()]
-    if not cleaned:
-        return ""
-    if len(cleaned) == 1:
-        return cleaned[0]
-    if len(cleaned) == 2:
-        return f"{cleaned[0]}和{cleaned[1]}"
-    return f"{'、'.join(cleaned[:-1])}以及{cleaned[-1]}"
-
-
-def collect_second_layer_insights(doc_root: Path, level_two: list[dict], module_docs: dict) -> list[dict]:
-    insights = []
-    for domain in level_two:
-        doc_rel = module_docs.get(domain["id"], domain.get("doc_path", ""))
-        if not doc_rel:
-            continue
-        path = doc_root / doc_rel
-        if not path.exists():
-            continue
-        sections = parse_markdown_sections(path)
-        insights.append(
-            {
-                "id": domain["id"],
-                "title": domain["title"],
-                "positioning": normalize_statement(" ".join(extract_section_summary(sections.get("定位", []), max_items=1))),
-                "core_points": extract_section_summary(sections.get("这一层内部怎么分", []), max_items=3),
-                "responsibilities": extract_section_summary(sections.get("这一层主要承载什么", []), max_items=2),
-            }
-        )
-    return insights
-
-
-def get_insight(insights: list[dict], domain_id: str) -> dict | None:
-    return next((item for item in insights if item["id"] == domain_id), None)
-
-
-def infer_project_positioning(domains: list[dict], traits: list[str], repo_summary: str | None, second_layer_insights: list[dict]) -> str:
-    trait_text = "、".join(traits) if traits else "桌面应用"
-    if repo_summary and "An Electron application with Vue and TypeScript" not in repo_summary:
-        return repo_summary
-    level_two_titles = [item["title"] for item in second_layer_insights[:3]]
-    if level_two_titles:
-        return (
-            f"这是一个以 {trait_text} 为基础的项目，当前重点围绕 {natural_join(level_two_titles)} 等专题域组织实现。"
-            "项目文档更强调先建立功能分层和阅读入口，再逐步进入具体实现链。"
-        )
-    first_domain_names = "、".join(domain["title"] for domain in domains if domain.get("level") == 1)
-    return (
-        f"这是一个以 {trait_text} 为基础的项目，当前主要围绕 {first_domain_names or '核心功能域'} 组织架构。"
-        "项目更强调功能分层、运行时边界和长期维护，而不是把目录树本身当成理解入口。"
-    )
-
-
-def infer_project_goal_lines(domains: list[dict], second_layer_insights: list[dict]) -> list[str]:
-    level_one = [domain for domain in domains if domain.get("level") == 1]
-    lines = []
-    if level_one:
-        lines.append(f"- 先把 {natural_join([domain['title'] for domain in level_one[:3]])} 等主要功能域的阅读入口稳定下来，降低首次接手成本。")
-    for insight in second_layer_insights[:3]:
-        if insight.get("positioning"):
-            lines.append(f"- 围绕{insight['positioning']}继续细化专题域，让这块能力有稳定的阅读入口和实现边界。")
-    if not second_layer_insights and len(level_one) > 1:
-        lines.append("- 当某个功能域内部已经形成稳定专题时，再继续下钻，避免总览文档承载过多实现细节。")
-    if not lines:
-        lines.append("- 先把项目的核心功能域和阅读入口稳定下来，再让专题域逐步细化实现说明。")
-    return lines
-
-
-def infer_architecture_principles(domains: list[dict], second_layer_insights: list[dict]) -> list[str]:
-    level_one = [domain for domain in domains if domain.get("level") == 1]
-    principles = [
-        "- 先按功能域理解项目，而不是按目录树或工具链配置理解项目。",
-        "- 第一层只负责说明系统由哪些大块组成；第二层才解释专题域；更细的实现链留给下层文档。",
-    ]
-    if level_one:
-        principles.append(f"- 当前总览先把系统收拢为 {natural_join([domain['title'] for domain in level_one[:3]])} 等一级功能域，再由下层文档展开细节。")
-    if second_layer_insights:
-        titles = [item["title"] for item in second_layer_insights[:4]]
-        principles.append(f"- 第一层功能域之下继续按 {'、'.join(titles)} 等专题域下钻，避免把所有实现细节堆在同一层。")
-        principles.append("- 项目目标与架构理念应优先从第二层专题域反推，再由第一层功能域负责收拢和导航。")
-    elif level_one:
-        principles.append("- 只有当某个一级功能域内部已经形成稳定专题时，再继续下钻；否则保持总览克制。")
-    principles.append("- `project-summary.md` 服务人类首次接手，`project-structure.md` 服务 AI 快速扫路径，两者职责应明确区分。")
-    return principles
-
-
-def write_project_summary(doc_root: Path, project_root: Path, domains: list[dict], module_docs: dict) -> None:
+def write_project_summary(doc_root: Path, project_root: Path, domains: list[dict], domain_analysis: dict) -> dict:
     summary_path = doc_root / "overview" / "project-summary.md"
-    traits = detect_project_traits(project_root)
-    level_one = [domain for domain in domains if domain.get("level") == 1]
-    level_two = [domain for domain in domains if domain.get("level") == 2]
-    repo_summary = extract_repo_summary(project_root)
-    second_layer_insights = collect_second_layer_insights(doc_root, level_two, module_docs)
-    first_domain_names = "、".join(domain["title"] for domain in level_one[:3]) if level_one else "核心功能域"
-    first_domain_lines = [
-        f"- `{domain['title']}`：{domain['summary']} 详见 `{module_docs.get(domain['id'], domain.get('doc_path', ''))}`"
-        for domain in level_one
-    ]
-    second_domain_lines = [
-        f"- `{domain['title']}`：{domain['summary']} 详见 `{module_docs.get(domain['id'], domain.get('doc_path', ''))}`"
-        for domain in level_two
-    ]
-    positioning = infer_project_positioning(domains, traits, repo_summary, second_layer_insights)
-    goal_lines = infer_project_goal_lines(domains, second_layer_insights)
-    architecture_lines = infer_architecture_principles(domains, second_layer_insights)
-    reading_lines = [
-        "- 人类第一次接手：先读这份 `project-summary.md`，再读 `modules/README.md`，然后沿功能域 README 继续下钻。",
-        "- 当问题已经落到具体专题时，直接进入对应的第二层专题域 README。",
-        "- 只有在需要快速确认大量路径或目录快照时，再读 `project-structure.md`。",
-    ]
-    content = f"""# 项目摘要
-
-## 项目定位
-
-{positioning}
-
-## 项目目标
-
-{chr(10).join(goal_lines)}
-
-## 架构理念
-
-{chr(10).join(architecture_lines)}
-
-## 第一层功能域
-
-{chr(10).join(first_domain_lines) if first_domain_lines else "- 待补充"}
-
-## 第二层专题域
-
-{chr(10).join(second_domain_lines) if second_domain_lines else "- 待补充"}
-
-## 推荐阅读方式
-
-{chr(10).join(reading_lines)}
-
-## AI 速读入口
-
-- `overview/project-structure.md`：给 AI 或需要快速扫路径的人使用的结构快照。
-- `index.json`：记录文档系统当前对齐状态与机器可读索引。
-"""
-    summary_path.write_text(content, encoding="utf-8")
+    summary_evidence = collect_summary_evidence(
+        project_root,
+        domains=domains,
+        domain_analysis=domain_analysis,
+    )
+    summary_path.write_text(render_summary(summary_evidence, confirmed=True), encoding="utf-8")
+    return build_summary_analysis_cache(summary_evidence)
 
 
 def remove_stale_module_docs(doc_root: Path, previous_module_docs: dict, next_module_docs: dict) -> tuple[list[str], list[str]]:
@@ -408,6 +211,7 @@ def rebuild_index(
     module_docs: dict,
     targets: list[str],
     domain_analysis: dict | None = None,
+    summary_analysis: dict | None = None,
 ) -> None:
     generated_docs = sorted(BASE_DOCS.union(module_docs.values()))
     git_snapshot = capture_git_snapshot(Path(index_payload["project_root"]))
@@ -422,10 +226,11 @@ def rebuild_index(
     index_payload["round_two_targets"] = targets
     index_payload["module_docs"] = dict(sorted(module_docs.items()))
     index_payload["domain_analysis"] = domain_analysis or {}
+    index_payload["summary_analysis"] = summary_analysis or {}
     index_payload["generated_docs"] = generated_docs
     index_payload["pending_updates"] = []
     mark_structure_aligned(index_payload, git_snapshot)
-    mark_modules_aligned(index_payload, git_snapshot)
+    mark_modules_aligned(index_payload, git_snapshot, strategy="reconcile")
     index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, align_to_current=True)
     index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -489,6 +294,7 @@ def main() -> int:
     previous_module_docs = dict(index_payload.get("module_docs", {}))
     mark_modules_drafted(index_payload)
     next_module_docs, domain_analysis = write_module_docs(project_root, doc_root, architecture_domains, next_targets)
+    summary_analysis = write_project_summary(doc_root, project_root, architecture_domains, domain_analysis)
     removed_docs, retained_stale_docs = remove_stale_module_docs(doc_root, previous_module_docs, next_module_docs)
     orphan_removed, orphan_retained = remove_orphan_module_files(
         doc_root,
@@ -498,7 +304,16 @@ def main() -> int:
     removed_docs.extend(orphan_removed)
     retained_stale_docs.extend(orphan_retained)
     removed_dirs = remove_empty_module_directories(doc_root) if args.prune_mode == "strict" else []
-    rebuild_index(index_path, index_payload, top_level, architecture_domains, next_module_docs, next_targets, domain_analysis)
+    rebuild_index(
+        index_path,
+        index_payload,
+        top_level,
+        architecture_domains,
+        next_module_docs,
+        next_targets,
+        domain_analysis,
+        summary_analysis,
+    )
 
     print(f"[完成] 已重写结构文档：{doc_root / 'overview' / 'project-structure.md'}")
     print(f"[完成] 已收敛并补写模块文档：{', '.join(next_module_docs.values()) if next_module_docs else '无'}")

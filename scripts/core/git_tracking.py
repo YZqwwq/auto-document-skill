@@ -9,32 +9,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.path_intelligence import is_low_semantic_risk_path, is_root_context_signal_path
+
 RECONCILE_CHANGE_COUNT_THRESHOLD = 20
 RECONCILE_MODULE_COUNT_THRESHOLD = 3
 RECONCILE_TOP_LEVEL_THRESHOLD = 2
-IGNORED_ROOT_TOOLING_FILES = {
-    "package.json",
-    "pnpm-lock.yaml",
-    "package-lock.json",
-    "yarn.lock",
-    "pyproject.toml",
-    "requirements.txt",
-    "Cargo.toml",
-    "go.mod",
-    "tsconfig.json",
-    "tsconfig.node.json",
-    "tsconfig.web.json",
-    "vite.config.ts",
-    "vite.config.js",
-    "electron.vite.config.ts",
-    "electron-builder.yml",
-    "electron-builder.yaml",
-    "eslint.config.mjs",
-    "postcss.config.mjs",
-    "tailwind.config.js",
-    "tailwind.config.ts",
-    "dev-app-update.yml",
-}
 
 
 def utc_now() -> str:
@@ -58,8 +37,25 @@ def normalize_path(value: str) -> str:
 
 
 def is_ignored_root_tooling_path(path: str) -> bool:
+    del path
+    return False
+
+
+def is_summary_trigger_path(path: str) -> bool:
+    return is_root_context_signal_path(path)
+
+
+def is_boundary_sensitive_path(path: str) -> bool:
     clean = normalize_path(path)
-    return "/" not in clean and Path(clean).name in IGNORED_ROOT_TOOLING_FILES
+    if not clean:
+        return False
+    target = Path(clean)
+    depth = len([part for part in clean.split("/") if part])
+    if is_root_context_signal_path(clean):
+        return True
+    if depth <= 2 and target.suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rs"}:
+        return True
+    return depth <= 2 and target.suffix.lower() in {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
 
 
 def run_git(project_root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess | None:
@@ -229,6 +225,31 @@ def unique_paths(*groups: list[str]) -> list[str]:
     return ordered
 
 
+def classify_impacted_units(changed_paths: list[str], tracked_units: dict) -> tuple[list[str], list[str]]:
+    impacted_units = set()
+    uncovered_paths = []
+    normalized_units: list[tuple[str, str]] = []
+    for unit_name, unit_value in tracked_units.items():
+        coverage_paths = unit_value if isinstance(unit_value, list) else [unit_name]
+        for module_path in coverage_paths:
+            module_prefix = module_path.replace("\\", "/").strip("/")
+            if module_prefix:
+                normalized_units.append((unit_name, module_prefix))
+    normalized_units.sort(key=lambda item: (-len(item[1].split("/")), item[1], item[0]))
+
+    for path in changed_paths:
+        matched_unit = None
+        for unit_name, module_prefix in normalized_units:
+            if path == module_prefix or path.startswith(module_prefix + "/"):
+                matched_unit = unit_name
+                break
+        if matched_unit:
+            impacted_units.add(matched_unit)
+        else:
+            uncovered_paths.append(path)
+    return sorted(impacted_units), uncovered_paths
+
+
 def assess_change_scope(
     changed_paths: list[str],
     tracked_units: dict,
@@ -236,49 +257,118 @@ def assess_change_scope(
     *,
     relation: str | None = None,
 ) -> dict:
-    normalized = [path for path in unique_paths(changed_paths) if not is_ignored_root_tooling_path(path)]
+    normalized = unique_paths(changed_paths)
     top_level_paths = sorted({path.split("/", 1)[0] for path in normalized if path})
     tracked_top_levels = {item.replace("\\", "/").strip("/") for item in tracked_paths}
-    impacted_modules = set()
-    for path in normalized:
-        for unit_name, unit_value in tracked_units.items():
-            coverage_paths = unit_value if isinstance(unit_value, list) else [unit_name]
-            for module_path in coverage_paths:
-                module_prefix = module_path.replace("\\", "/").strip("/")
-                if path == module_prefix or path.startswith(module_prefix + "/"):
-                    impacted_modules.add(unit_name)
-                    break
-    new_top_levels = sorted([path for path in top_level_paths if path not in tracked_top_levels])
+    critical_root_files = sorted([Path(path).name for path in normalized if is_summary_trigger_path(path)])
+    impacted_modules, uncovered_paths = classify_impacted_units(normalized, tracked_units)
+    new_top_levels = sorted(
+        [
+            path
+            for path in top_level_paths
+            if path not in tracked_top_levels and Path(path).suffix == "" and path not in critical_root_files
+        ]
+    )
+    low_semantic_risk_paths = [path for path in normalized if is_low_semantic_risk_path(path)]
+    boundary_sensitive_paths = [path for path in normalized if is_boundary_sensitive_path(path)]
+    root_dirs = sorted([path for path in normalized if "/" not in path and Path(path).suffix == ""])
 
     recommended_update_mode = "incremental"
+    scope_level = "module"
+    requires_human_review = False
+    requires_summary_review = False
+    requires_structure_review = False
     reasons = []
+
+    if critical_root_files:
+        recommended_update_mode = "user_review_required"
+        scope_level = "summary"
+        requires_human_review = True
+        requires_summary_review = True
+        reasons.append(f"触及根级项目入口或关键配置：{', '.join(critical_root_files)}。")
+
+    if new_top_levels:
+        if recommended_update_mode != "user_review_required":
+            recommended_update_mode = "reconcile"
+        scope_level = "structure"
+        requires_structure_review = True
+        reasons.append(f"出现了文档系统尚未跟踪的顶层路径：{', '.join(new_top_levels)}。")
+
+    if uncovered_paths and not requires_summary_review:
+        if recommended_update_mode not in {"user_review_required", "reconcile"}:
+            recommended_update_mode = "incremental"
+        if scope_level != "summary":
+            scope_level = "structure"
+        requires_structure_review = True
+        reasons.append("部分变化尚未落入当前功能域映射，需要复查功能树到代码树映射。")
+
     if len(normalized) >= RECONCILE_CHANGE_COUNT_THRESHOLD:
-        recommended_update_mode = "reconcile"
+        if recommended_update_mode != "user_review_required":
+            recommended_update_mode = "reconcile"
+        scope_level = "structure" if scope_level != "summary" else scope_level
+        requires_structure_review = True
         reasons.append(f"变化文件数达到 {len(normalized)} 个。")
     if len(top_level_paths) >= RECONCILE_TOP_LEVEL_THRESHOLD:
-        recommended_update_mode = "reconcile"
+        if recommended_update_mode != "user_review_required":
+            recommended_update_mode = "reconcile"
+        scope_level = "structure" if scope_level != "summary" else scope_level
+        requires_structure_review = True
         reasons.append(f"变化已跨越 {len(top_level_paths)} 个顶层路径。")
     if len(impacted_modules) >= RECONCILE_MODULE_COUNT_THRESHOLD:
-        recommended_update_mode = "reconcile"
+        if recommended_update_mode != "user_review_required":
+            recommended_update_mode = "reconcile"
+        scope_level = "structure" if scope_level != "summary" else scope_level
+        requires_structure_review = True
         reasons.append(f"已影响 {len(impacted_modules)} 个已登记模块。")
-    if new_top_levels:
-        recommended_update_mode = "reconcile"
-        reasons.append(f"出现了文档系统尚未跟踪的顶层路径：{', '.join(new_top_levels)}。")
     if relation == "diverged" and len(normalized) >= 8:
-        recommended_update_mode = "reconcile"
+        if recommended_update_mode != "user_review_required":
+            recommended_update_mode = "reconcile"
+        scope_level = "structure" if scope_level != "summary" else scope_level
+        requires_structure_review = True
         reasons.append("当前分支与文档基线已经分叉，且变化范围已超出轻量增量更新。")
 
+    if (
+        normalized
+        and not requires_human_review
+        and not requires_structure_review
+        and len(normalized) == len(low_semantic_risk_paths)
+        and len(top_level_paths) <= 1
+        and len(impacted_modules) <= 1
+    ):
+        recommended_update_mode = "git_alignment_only"
+        scope_level = "git"
+        reasons.append("当前变化集中在测试或夹具等低语义风险路径，正文语义大概率仍然成立。")
+
+    if recommended_update_mode == "incremental":
+        if boundary_sensitive_paths:
+            reasons.append("变化触及现有功能域中的入口或边界文件，建议最小范围更新对应功能域文档。")
+        else:
+            reasons.append("变化仍集中在有限功能域内，先按最小受影响功能域规划增量更新。")
+
     if not reasons:
-        reasons.append("变化仍集中在有限路径内，适合先走增量更新。")
+        reasons.append("当前未识别到需要正文更新的结构性信号。")
 
     return {
         "recommended_update_mode": recommended_update_mode,
         "recommended_reason": " ".join(reasons),
         "changed_paths_count": len(normalized),
         "top_level_paths": top_level_paths,
-        "impacted_modules": sorted(impacted_modules),
+        "scope_level": scope_level,
+        "impacted_modules": impacted_modules,
         "new_top_levels": new_top_levels,
-        "critical_root_files": [],
+        "critical_root_files": critical_root_files,
+        "uncovered_paths": uncovered_paths,
+        "low_semantic_risk_paths": low_semantic_risk_paths,
+        "boundary_sensitive_paths": boundary_sensitive_paths,
+        "requires_human_review": requires_human_review,
+        "requires_summary_review": requires_summary_review,
+        "requires_structure_review": requires_structure_review,
+        "root_dirs": root_dirs,
+        "judgment_prompt": (
+            "请基于当前变化路径、变化广度、是否触及根级上下文证据、"
+            "以及是否仍落在现有功能域映射内，判断这次维护应该走 "
+            "`git_alignment_only`、`content_update`、`reconcile` 还是 `user_review_required`。"
+        ),
     }
 
 
@@ -290,6 +380,8 @@ def format_scope_summary(scope: dict) -> str:
     ]
     if scope.get("new_top_levels"):
         parts.append(f"新顶层路径：{', '.join(scope['new_top_levels'])}")
+    if scope.get("critical_root_files"):
+        parts.append(f"关键根级文件：{', '.join(scope['critical_root_files'])}")
     return "；".join(parts)
 
 

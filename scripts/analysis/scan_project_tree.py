@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-生成第一轮项目目录树快照，并更新 project-docs 元数据。
+建立功能树与代码树映射文档，并更新 project-docs 元数据。
 """
 
 from __future__ import annotations
@@ -14,78 +14,13 @@ from pathlib import Path
 
 from analysis.architecture_domains import infer_architecture_domains, recommended_domain_ids, tracked_top_level_paths
 from core.git_tracking import capture_git_snapshot, merge_git_state
+from core.path_intelligence import DEFAULT_OMIT_DIR_NAMES, build_path_evidence, infer_title_from_path, is_root_context_signal_path, score_root_entry
 from core.workflow_state import ensure_workflow_state, mark_structure_aligned, mark_structure_drafted, summary_gate_message, summary_is_confirmed
 from generation.create_module_doc import detect_project_traits
 
 
 DEFAULT_DOC_DIR = "project-docs"
-DEFAULT_EXCLUDES = {
-    ".git",
-    "node_modules",
-    "dist",
-    "build",
-    "coverage",
-    ".next",
-    ".cache",
-    "tmp",
-    "temp",
-}
-ROOT_TOOLING_FILES = {
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "tsconfig.json",
-    "tsconfig.node.json",
-    "tsconfig.web.json",
-    "vite.config.ts",
-    "vite.config.js",
-    "electron.vite.config.ts",
-    "electron-builder.yml",
-    "electron-builder.yaml",
-    "eslint.config.mjs",
-    "postcss.config.mjs",
-    "tailwind.config.js",
-    "tailwind.config.ts",
-    "dev-app-update.yml",
-}
-ARCHITECTURE_PRIMARY_DIRS = {
-    "src",
-    "app",
-    "server",
-    "client",
-    "backend",
-    "frontend",
-    "packages",
-    "libs",
-    "lib",
-    "core",
-    "runtime",
-    "services",
-    "developmentlog",
-    "docs",
-    "doc",
-    "design",
-    "specs",
-}
-ARCHITECTURE_SECONDARY_DIRS = {
-    "test",
-    "tests",
-    "__tests__",
-    "examples",
-    "scripts",
-}
-ARCHITECTURE_OMIT_DIRS = {
-    "out",
-    "dist",
-    "build",
-    "coverage",
-    ".next",
-    "resources",
-    "assets",
-    "public",
-    "static",
-}
+DEFAULT_EXCLUDES = DEFAULT_OMIT_DIR_NAMES | {"tmp", "temp"}
 
 
 def utc_now() -> str:
@@ -166,11 +101,8 @@ def is_git_ignored(project_root_str: str, relative_path: str) -> bool:
 
 
 def is_tooling_root_file(path: Path, project_root: Path) -> bool:
-    try:
-        rel = path.relative_to(project_root)
-    except ValueError:
-        return False
-    return path.is_file() and len(rel.parts) == 1 and path.name in ROOT_TOOLING_FILES
+    del project_root
+    return False
 
 
 def architecture_focus_score(entry: Path, project_root: Path) -> int:
@@ -180,25 +112,11 @@ def architecture_focus_score(entry: Path, project_root: Path) -> int:
         return 0
     if len(rel.parts) != 1:
         return 0
-    name = entry.name
-    lower_name = name.lower()
-    if entry.is_dir():
-        if lower_name in ARCHITECTURE_PRIMARY_DIRS:
-            return 100
-        if lower_name in ARCHITECTURE_SECONDARY_DIRS:
-            return 40
-        if lower_name in ARCHITECTURE_OMIT_DIRS:
-            return 0
-        return 25
-    if lower_name in {"architecture.md", "system.md", "design.md"}:
-        return 50
-    if lower_name == "readme.md":
-        return 10
-    return 0
+    return score_root_entry(entry)
 
 
 def is_architecture_focus_entry(entry: Path, project_root: Path) -> bool:
-    return architecture_focus_score(entry, project_root) >= 40
+    return architecture_focus_score(entry, project_root) >= 18
 
 
 def should_skip(path: Path, project_root: Path, include_hidden: bool) -> bool:
@@ -255,6 +173,7 @@ def summarize_top_level(project_root: Path, include_hidden: bool) -> list[dict]:
             "file_count": 0,
             "dir_count": 0,
             "focus_score": architecture_focus_score(entry, project_root),
+            "evidence": build_path_evidence(entry.name, entry.resolve())[:3],
         }
         if entry.is_dir():
             file_count = 0
@@ -279,16 +198,14 @@ def recommend_targets(top_level: list[dict]) -> list[str]:
         key=lambda item: (item.get("focus_score", 0), item["file_count"] + item["dir_count"] * 2, item["path"].lower()),
         reverse=True,
     )
-    return [item["path"] for item in ranked if item.get("focus_score", 0) >= 40][:6]
+    return [item["path"] for item in ranked if item.get("focus_score", 0) >= 18][:6]
 
 
 def render_stack_section(project_root: Path) -> str:
     traits = detect_project_traits(project_root)
     lines = [f"- 当前从依赖中识别到的主要技术栈：{'、'.join(traits) if traits else '待补充'}"]
-    if "Electron" in traits:
-        lines.append("- `main / preload / renderer` 这类目录通常优先表示 Electron 的运行时分层，而不是项目自定义业务分层。")
-    if "Vue 3" in traits or "React" in traits or "Next.js" in traits:
-        lines.append("- 前端目录内部的 `views / components / features / router` 等结构，通常先服从前端框架约定，再叠加项目自己的业务主题。")
+    if traits:
+        lines.append("- 这些技术栈信号只能作为理解路径的背景，不应直接替代功能域判断。")
     if not traits:
         lines.append("- 当前无法仅凭依赖可靠识别技术栈，请在 summary 已确认的前提下手动补充。")
     return "\n".join(lines)
@@ -310,14 +227,21 @@ def write_structure_doc(
     }
     important_paths = "\n".join(
         [
-            f"- `{item['path']}`：{type_labels.get(item['type'], item['type'])}，{item['file_count']} 个文件，{item['dir_count']} 个子目录"
+            (
+                f"- `{item['path']}`：{type_labels.get(item['type'], item['type'])}，"
+                f"{item['file_count']} 个文件，{item['dir_count']} 个子目录。"
+                f" 证据：{' '.join(item.get('evidence', []))}"
+            )
             for item in top_level
         ]
     )
     domain_lookup = {domain["id"]: domain for domain in domains}
     recommended = "\n".join(
         [
-            f"- `{domain_lookup[target]['title']}`：覆盖 `{', '.join(domain_lookup[target]['paths'])}`"
+            (
+                f"- `{domain_lookup[target]['title']}`：当前主要落在 `{', '.join(domain_lookup[target]['paths'])}`。"
+                f" 候选依据：{'；'.join(domain_lookup[target].get('signal_basis', [])[:2])}"
+            )
             for target in targets
             if target in domain_lookup
         ]
@@ -335,19 +259,30 @@ def write_structure_doc(
     third_layer_domains = [domain for domain in domains if domain.get("level") == 3]
     first_layer_text = "\n".join(
         [
-            f"- `{domain['title']}`：覆盖 `{', '.join(domain['paths'])}`"
+            (
+                f"- `{domain['title']}`：{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
+                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+            )
             for domain in first_layer_domains
         ]
     ) if first_layer_domains else "- 尚未推断出稳定的第一层功能域"
     second_layer_text = "\n".join(
         [
-            f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下，覆盖 `{', '.join(domain['paths'])}`"
+            (
+                f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下。"
+                f"{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
+                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+            )
             for domain in second_layer_domains
         ]
     ) if second_layer_domains else "- 当前没有继续下沉的第二层专题域"
     third_layer_text = "\n".join(
         [
-            f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下，覆盖 `{', '.join(domain['paths'])}`"
+            (
+                f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下。"
+                f"{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
+                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+            )
             for domain in third_layer_domains
         ]
     ) if third_layer_domains else "- 当前没有继续下沉的第三层专题域"
@@ -357,14 +292,18 @@ def write_structure_doc(
 
 ## 文档定位
 
-这是一份偏 AI 和维护者使用的结构责任树，用来解释技术栈默认目录语义、当前真实路径，以及这些路径如何被组织成功能责任树。
-正常人类阅读项目时，不应先从这份文档开始，而应先确认 `overview/project-summary.md`，再借助这里理解路径与职责的关系。
+这份文档不是普通目录树快照，而是一份“功能树到代码树”的映射说明。
+它的重点不是展示有哪些目录，而是回答：
+
+- 这个项目当前主要有哪些功能层级
+- 每一层功能在代码中主要落在哪里
+- 应该从哪个功能入口开始阅读代码
 
 ## 这份文档适合什么时候看
 
-- 已有 summary 基线，需要进一步建立结构责任树
-- 需要区分“框架默认目录语义”和“项目自定义功能边界”
-- 需要为 modules 生成提供路径到职责的中间层
+- 已有 summary 基线，需要进一步建立功能树与代码树映射
+- 需要确认某一功能域在代码里主要落在哪些路径和文件
+- 需要为 `modules/` 生成功能域文档提供结构中间层
 
 ## 扫描元数据
 
@@ -377,37 +316,43 @@ def write_structure_doc(
 
 {stack_section}
 
-## 顶层目录树
+## 第一层功能树
+
+{first_layer_text}
+
+## 下级功能树
+
+### 第二层功能域
+
+{second_layer_text}
+
+### 第三层功能域
+
+{third_layer_text}
+
+## 代码树映射辅助视图
+
+### 顶层目录树快照
 
 ```text
 {chr(10).join(tree_lines)}
 ```
 
-## 顶层路径说明
+### 顶层路径概览与证据
 
 {important_paths if important_paths else "- 无"}
 
-## 功能责任树
+## 映射边界
 
-### 第一层功能域
+- 这里优先记录功能边界与代码落点关系，而不是穷举所有目录
+- 根级文本和配置文件应视为“理解项目意图与边界的证据”，而不是直接等价于功能域
+- 这份文档不直接替代 summary；它只负责把 summary 映射成功能层级和代码入口
 
-{first_layer_text}
-
-### 第二层专题域
-
-{second_layer_text}
-
-## 扫描边界
-
-- 这里优先记录与项目理念、运行时实现和结构责任树直接相关的路径
-- `package.json`、`tsconfig*`、构建配置等工具性根级文件默认不展开成结构主体，但可用于识别技术栈和默认目录语义
-- 这份文档不直接替代 summary；它只负责把 summary 落到路径和职责树上
-
-## AI 建议入口顺序
+## 推荐阅读顺序
 
 {reading_order}
 
-## 当前推荐继续下钻的专题
+## 当前推荐继续下钻的功能域
 
 {recommended}
 """
@@ -415,7 +360,7 @@ def write_structure_doc(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="扫描仓库并写入第一轮结构文档。")
+    parser = argparse.ArgumentParser(description="扫描仓库并建立功能树与代码树映射文档。")
     parser.add_argument("--project-root", required=True, help="需要扫描的仓库根目录。")
     parser.add_argument("--doc-root", help="文档根目录。默认使用 <project-root>/project-docs。")
     parser.add_argument("--max-depth", type=int, default=2, help="目录树渲染的最大深度。")
@@ -429,7 +374,7 @@ def main() -> int:
 
     if not summary_is_confirmed(index_payload):
         print(f"[阻止] {summary_gate_message(index_payload)}")
-        print("[下一步] 请先生成并确认 `overview/project-summary.md`，确认后再建立 structure。")
+        print("[下一步] 请先让 `overview/project-summary.md` 成为可继续的项目基线，再建立功能树映射。")
         return 0
 
     mark_structure_drafted(index_payload)
@@ -461,8 +406,8 @@ def main() -> int:
     index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot)
     index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    print(f"[完成] 已写入结构文档：{doc_root / 'overview' / 'project-structure.md'}")
-    print(f"[完成] 推荐的第二轮目标：{', '.join(targets) if targets else '无'}")
+    print(f"[完成] 已写入功能树与代码树映射文档：{doc_root / 'overview' / 'project-structure.md'}")
+    print(f"[完成] 推荐继续下钻的功能域：{', '.join(targets) if targets else '无'}")
     return 0
 
 
