@@ -2,8 +2,13 @@
 """
 基于真实目录结构收集功能责任候选信号。
 
-当前版本不再把少数固定路径名直接翻译成既定功能桶，
-而是优先输出“来自真实路径的候选功能域 + 证据”。
+当前版本不再把路径名直接翻译成固定功能桶，
+也尽量避免靠少量硬编码词表直接排除候选；
+这里更偏向：
+
+- 收集真实路径事实
+- 生成弱提示
+- 为后续 AI 判断保留候选功能域与证据
 """
 
 from __future__ import annotations
@@ -11,12 +16,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.path_intelligence import (
-    CODE_SUFFIXES,
     DEFAULT_OMIT_DIR_NAMES,
     build_path_evidence,
-    collect_readme_summary,
-    collect_sample_entries,
-    count_meaningful_children,
+    build_weak_path_hints,
+    collect_path_facts,
     infer_title_from_path,
     is_root_context_signal_path,
     normalize_relpath,
@@ -25,21 +28,17 @@ from core.path_intelligence import (
 )
 
 
-SECOND_LEVEL_OMIT_NAMES = {
-    "test",
-    "tests",
-    "__tests__",
-    "mock",
-    "mocks",
-    "fixture",
-    "fixtures",
-    "example",
-    "examples",
-}
-
-
 def slugify(value: str) -> str:
     return normalize_relpath(value).replace("/", "__").replace(":", "").replace(".", "_")
+
+
+def relative_to_project(project_root: Path, path: Path) -> str:
+    root = project_root.resolve()
+    target = path.resolve()
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError:
+        return normalize_relpath(path.as_posix())
 
 
 def visible_entries(path: Path) -> list[Path]:
@@ -50,39 +49,53 @@ def visible_entries(path: Path) -> list[Path]:
     ]
 
 
-def topic_score(path: Path) -> int:
-    if path.is_file():
-        return score_root_entry(path)
-    dir_count, file_count = count_meaningful_children(path, max_scan=160)
-    score = 10 + min(20, dir_count * 2) + min(20, file_count)
-    if collect_readme_summary(path):
-        score += 8
-    if len(collect_sample_entries(path, limit=6)) >= 3:
-        score += 5
-    return score
+def candidate_priority(project_root: Path, path: Path) -> int:
+    rel_path = relative_to_project(project_root, path)
+    facts = collect_path_facts(rel_path, path)
+    priority = score_root_entry(path)
+    if path.is_dir():
+        priority += min(8, len(facts.get("sample_entries", [])))
+    if facts.get("readme_summary"):
+        priority += 6
+    if facts.get("is_root_level") and facts.get("root_text_like"):
+        priority -= 10
+    if facts.get("is_root_level") and facts.get("root_structured_config_like"):
+        priority -= 8
+    if facts.get("low_signal_name_hint") or facts.get("low_signal_suffix_hint"):
+        priority -= 3
+    return max(priority, 0)
 
 
-def is_meaningful_topic_dir(path: Path) -> bool:
-    if not path.exists() or not path.is_dir():
+def path_can_anchor_domain(project_root: Path, path: Path) -> bool:
+    rel_path = relative_to_project(project_root, path)
+    facts = collect_path_facts(rel_path, path)
+    if path.name.lower().startswith("readme"):
         return False
-    lower_name = path.name.lower()
-    if lower_name in DEFAULT_OMIT_DIR_NAMES or lower_name in SECOND_LEVEL_OMIT_NAMES:
+    if facts["path_type"] == "directory":
+        return True
+    if facts["is_root_level"] and (facts["root_text_like"] or facts["root_structured_config_like"]):
         return False
-    dir_count, file_count = count_meaningful_children(path, max_scan=120)
-    return bool(dir_count or file_count or collect_readme_summary(path))
+    if facts["looks_like_text"] and not facts["looks_like_code"]:
+        return False
+    return True
 
 
-def collapse_single_container(path: Path, *, max_steps: int = 2) -> Path:
+def collapse_single_container(path: Path, project_root: Path, *, max_steps: int = 2) -> Path:
     current = path
     for _ in range(max_steps):
         if not current.is_dir():
             break
-        children = [child for child in visible_entries(current) if child.is_dir()]
-        dir_count, file_count = count_meaningful_children(current, max_scan=80)
-        meaningful_children = [child for child in children if is_meaningful_topic_dir(child)]
-        if file_count > 3 or len(meaningful_children) != 1:
+        children = [child for child in visible_entries(current) if path_can_anchor_domain(project_root, child)]
+        child_dirs = [child for child in children if child.is_dir()]
+        if len(child_dirs) != 1:
             break
-        current = meaningful_children[0]
+        rel_path = relative_to_project(project_root, current)
+        facts = collect_path_facts(rel_path, current, max_scan=120)
+        if facts["file_count"] > 1:
+            break
+        if len(children) > 2:
+            break
+        current = child_dirs[0]
     return current
 
 
@@ -90,19 +103,16 @@ def discover_level_one_paths(project_root: Path, max_items: int = 8) -> list[str
     candidates: list[tuple[int, str]] = []
     seen: set[str] = set()
     for entry in visible_entries(project_root):
-        if entry.name.lower() in DEFAULT_OMIT_DIR_NAMES:
+        if not path_can_anchor_domain(project_root, entry):
             continue
         if entry.is_file() and is_root_context_signal_path(entry.name):
             continue
-        if entry.is_file() and entry.suffix.lower() not in CODE_SUFFIXES:
-            continue
-        candidate = collapse_single_container(entry) if entry.is_dir() else entry
-        rel_path = candidate.relative_to(project_root).as_posix()
+        candidate = collapse_single_container(entry, project_root) if entry.is_dir() else entry
+        rel_path = relative_to_project(project_root, candidate)
         if rel_path in seen:
             continue
         seen.add(rel_path)
-        score = score_root_entry(entry) + topic_score(candidate)
-        candidates.append((score, rel_path))
+        candidates.append((candidate_priority(project_root, candidate), rel_path))
     candidates.sort(key=lambda item: (-item[0], item[1]))
     return [path for _, path in candidates[:max_items]]
 
@@ -114,17 +124,16 @@ def discover_child_topic_paths(project_root: Path, parent_domain: dict, max_chil
         target = (project_root / rel).resolve()
         if not target.exists() or not target.is_dir():
             continue
-        roots = [collapse_single_container(target)]
-        for root in roots:
-            for child in visible_entries(root):
-                if not is_meaningful_topic_dir(child):
-                    continue
-                candidate = collapse_single_container(child)
-                rel_path = candidate.relative_to(project_root).as_posix()
-                if rel_path in seen:
-                    continue
-                seen.add(rel_path)
-                candidates.append((topic_score(candidate), rel_path))
+        root = collapse_single_container(target, project_root)
+        for child in visible_entries(root):
+            if not path_can_anchor_domain(project_root, child):
+                continue
+            candidate = collapse_single_container(child, project_root) if child.is_dir() else child
+            rel_path = relative_to_project(project_root, candidate)
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            candidates.append((candidate_priority(project_root, candidate), rel_path))
     candidates.sort(key=lambda item: (-item[0], item[1]))
     return [path for _, path in candidates[:max_children]]
 
@@ -132,7 +141,9 @@ def discover_child_topic_paths(project_root: Path, parent_domain: dict, max_chil
 def build_domain(project_root: Path, relative_path: str, *, level: int, parent_id: str | None) -> dict:
     clean = normalize_relpath(relative_path)
     target = (project_root / clean).resolve()
+    facts = collect_path_facts(clean, target)
     evidence = build_path_evidence(clean, target)
+    weak_hints = build_weak_path_hints(clean, target, facts)
     title = infer_title_from_path(clean)
     return {
         "id": slugify(clean),
@@ -144,15 +155,27 @@ def build_domain(project_root: Path, relative_path: str, *, level: int, parent_i
         "functional_role": "top_level_candidate" if level == 1 else "child_candidate",
         "question_hints": [
             f"`{clean}` 在当前项目里实际承担什么职责",
-            f"`{clean}` 是否已经构成稳定功能边界，而不只是目录组织",
+            f"`{clean}` 是否已经构成稳定功能边界，而不只是路径组织",
             f"`{clean}` 与它的上层和同层路径之间是什么协作关系",
         ],
         "signal_type": "path_evidence",
         "signal_strength": "high" if len(evidence) >= 4 else "medium",
         "signal_basis": evidence,
+        "weak_hints": weak_hints,
+        "path_facts": {
+            "path_type": facts["path_type"],
+            "path_depth": facts["path_depth"],
+            "dir_count": facts["dir_count"],
+            "file_count": facts["file_count"],
+            "sample_entries": facts["sample_entries"][:6],
+            "readme_summary": facts["readme_summary"],
+            "low_signal_name_hint": facts["low_signal_name_hint"],
+            "low_signal_suffix_hint": facts["low_signal_suffix_hint"],
+        },
         "judgment_prompt": (
-            f"请基于这些路径证据判断 `{clean}` 是否应该被视为一个稳定的功能域，"
-            f"以及它在当前项目里更像顶层能力、下级专题，还是只是暂时的目录组织。"
+            f"请基于 `{clean}` 的真实路径事实、可见子项、同层 README、弱提示和上层层级关系，"
+            f"判断它是否应该被视为一个稳定的功能域；如果是，它更像顶层能力、下级专题，"
+            f"还是只是当前实现阶段的临时组织。"
         ),
         "candidate": True,
         "paths": [clean],
