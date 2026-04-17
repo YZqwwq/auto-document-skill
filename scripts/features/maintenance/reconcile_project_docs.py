@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
 在大范围代码调整后，将 project-docs 收敛到当前项目状态。
+
+这条链路负责：
+
+- 基于已确认 summary、结构占位结果和模块分析重写 project-docs
+- 清理旧文档、刷新索引状态与 git 对齐点
+- 为当前会话中的 Codex 提供一套重新对齐后的文档基线
+
+它依赖当前会话中的 Codex 完成功能域判断与正文写作，不承担脚本内模型调用。
 """
 
 from __future__ import annotations
@@ -10,10 +18,20 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from analysis.architecture_domains import infer_architecture_domains, recommended_domain_ids, tracked_top_level_paths
-from analysis.scan_project_tree import build_tree, load_index, summarize_top_level, write_structure_doc
-from core.git_tracking import capture_git_snapshot, merge_git_state
-from core.workflow_state import (
+from scripts.features.structure.architecture_domains import (
+    infer_architecture_domains as collect_architecture_domain_placeholders,
+    recommended_domain_ids as select_architecture_domain_target_ids,
+    tracked_top_level_paths,
+)
+from scripts.features.structure.scan_project_tree import (
+    build_tree,
+    load_index,
+    read_confirmed_summary_text,
+    summarize_top_level,
+    write_structure_doc,
+)
+from scripts.shared.git_tracking import capture_git_snapshot, merge_git_state
+from scripts.shared.workflow_state import (
     ensure_workflow_state,
     mark_modules_aligned,
     mark_modules_drafted,
@@ -22,13 +40,13 @@ from core.workflow_state import (
     summary_gate_message,
     summary_is_confirmed,
 )
-from generation.create_module_doc import (
+from scripts.features.module_docs.create_module_doc import (
     analyze_domain,
     normalize_doc_root,
     render_domain_doc_from_analysis,
     update_modules_readme,
 )
-from summary.draft_project_summary import (
+from scripts.features.summary.draft_project_summary import (
     build_summary_analysis_cache,
     collect_summary_evidence,
     render_summary,
@@ -50,6 +68,16 @@ DOC_SCHEMA_VERSION = "2.0.0"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def collect_reconcile_domain_placeholders(project_root: Path, summary_text: str | None = None) -> list[dict]:
+    """整理收敛阶段可复用的功能域占位结果。"""
+    return collect_architecture_domain_placeholders(project_root, summary_text=summary_text)
+
+
+def select_reconcile_targets(domains: list[dict]) -> list[str]:
+    """挑出当前收敛阶段建议优先保留或重写的功能域目标。"""
+    return select_architecture_domain_target_ids(domains)
 
 
 def merge_targets(preferred: list[str], fallback: list[str]) -> list[str]:
@@ -163,8 +191,8 @@ def write_root_readme(doc_root: Path, domains: list[dict], module_docs: dict) ->
 
 ```text
 overview
-|-- project-structure.md  项目的文件层次，用于引导 AI 快速建立路径地图；项目开发者通常可以按需查看
-|-- project-summary.md    对项目目的与设计理念的阐述；AI 会先生成模板，但仍需要开发者维护和补充，用来给后续 AI 工作一个明确方向
+|-- project-structure.md  功能树到代码树的结构文档，用于帮助当前会话中的 Codex 建立路径地图；项目开发者通常可以按需查看
+|-- project-summary.md    对项目目的与设计理念的阐述；当前会话中的 Codex 会先整理草案，但仍需要开发者维护和补充，用来给后续协作一个明确方向
 
 modules
 |-- README.md             功能域总入口，用来判断应该先从哪个功能域进入
@@ -243,7 +271,7 @@ def main() -> int:
     parser.add_argument(
         "--use-recommended-only",
         action="store_true",
-        help="仅使用本轮扫描推荐的第二轮目标，忽略历史模块登记。",
+        help="仅使用本轮整理出的优先下钻目标，忽略历史模块登记。",
     )
     parser.add_argument(
         "--prune-mode",
@@ -266,10 +294,11 @@ def main() -> int:
         return 0
 
     mark_structure_drafted(index_payload)
+    summary_text = read_confirmed_summary_text(doc_root)
     tree_lines = build_tree(project_root, project_root, args.max_depth, args.include_hidden)
     top_level = summarize_top_level(project_root, args.include_hidden)
-    architecture_domains = infer_architecture_domains(project_root)
-    recommended_targets = recommended_domain_ids(architecture_domains)
+    architecture_domains = collect_reconcile_domain_placeholders(project_root, summary_text=summary_text)
+    recommended_targets = select_reconcile_targets(architecture_domains)
     write_structure_doc(
         doc_root,
         project_root,
@@ -279,6 +308,7 @@ def main() -> int:
         architecture_domains,
         args.max_depth,
         summary_confirmed_at=index_payload.get("summary_state", {}).get("confirmed_at"),
+        summary_input_state="provided" if summary_text else "missing",
     )
 
     explicit_targets = [item.replace("\\", "/").strip("/") for item in (args.target or [])]

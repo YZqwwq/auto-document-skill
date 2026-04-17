@@ -9,6 +9,9 @@
 - `structure` 表示功能树与代码树映射状态，而不是简单目录树状态
 - `module` 表示功能域文档是否仍与当前项目状态对齐
 - git 变化不自动等于正文要改写，允许出现“只更新 git 基线”的处理结果
+
+这份状态机只负责记录和推进工作流状态，不负责替代当前会话中的
+Codex 完成项目语义判断。
 """
 
 from __future__ import annotations
@@ -261,7 +264,7 @@ def structure_gate_message(index_payload: dict) -> str:
     return "当前功能树与代码树映射不可用于模块生成。"
 
 
-def mark_summary_drafted(index_payload: dict, git_snapshot: dict | None = None, *, source: str = "ai_draft") -> None:
+def mark_summary_drafted(index_payload: dict, git_snapshot: dict | None = None, *, source: str = "codex_session_draft") -> None:
     ensure_workflow_state(index_payload)
     branch, sha = current_ref(git_snapshot)
     index_payload["summary_state"].update(
@@ -301,7 +304,7 @@ def mark_summary_confirmed(
     branch, sha = current_ref(git_snapshot)
     confirmed_at = utc_now()
     if confirmation_mode is None:
-        confirmation_mode = "human_explicit" if confirmed_by == "user" else "ai_assisted"
+        confirmation_mode = "human_explicit" if confirmed_by == "user" else "codex_assisted"
     index_payload["summary_state"].update(
         {
             "status": SUMMARY_CONFIRMED,

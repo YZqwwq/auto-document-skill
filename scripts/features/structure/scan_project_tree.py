@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-建立功能树与代码树映射文档，并更新 project-docs 元数据。
+整理功能树与代码树映射所需的结构证据，并更新 project-docs 元数据。
+
+这条链路负责：
+
+- 扫描仓库与顶层路径证据
+- 生成给当前会话中的 Codex 使用的结构文档与占位结果
+- 维护 project-docs/index.json 中与结构层相关的状态
+
+它不负责在脚本内部自动完成最终功能域判断。
 """
 
 from __future__ import annotations
@@ -12,11 +20,15 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from analysis.architecture_domains import infer_architecture_domains, recommended_domain_ids, tracked_top_level_paths
-from core.git_tracking import capture_git_snapshot, merge_git_state
-from core.path_intelligence import DEFAULT_OMIT_DIR_NAMES, build_path_evidence, infer_title_from_path, is_root_context_signal_path, score_root_entry
-from core.workflow_state import ensure_workflow_state, mark_structure_aligned, mark_structure_drafted, summary_gate_message, summary_is_confirmed
-from generation.create_module_doc import detect_project_traits
+from scripts.features.structure.architecture_domains import (
+    infer_architecture_domains as collect_architecture_domain_placeholders,
+    recommended_domain_ids as select_architecture_domain_target_ids,
+    tracked_top_level_paths,
+)
+from scripts.shared.git_tracking import capture_git_snapshot, merge_git_state
+from scripts.shared.path_intelligence import DEFAULT_OMIT_DIR_NAMES, build_path_evidence, infer_title_from_path, is_root_context_signal_path, score_root_entry
+from scripts.shared.workflow_state import ensure_workflow_state, mark_structure_aligned, mark_structure_drafted, summary_gate_message, summary_is_confirmed
+from scripts.features.module_docs.create_module_doc import detect_project_traits
 
 
 DEFAULT_DOC_DIR = "project-docs"
@@ -39,6 +51,24 @@ def load_index(doc_root: Path) -> tuple[Path, dict]:
     if not index_path.exists():
         raise FileNotFoundError(f"在 {index_path} 未找到 index.json。请先初始化文档。")
     return index_path, json.loads(index_path.read_text(encoding="utf-8"))
+
+
+def read_confirmed_summary_text(doc_root: Path) -> str | None:
+    summary_path = doc_root / "overview" / "project-summary.md"
+    if not summary_path.exists() or not summary_path.is_file():
+        return None
+    text = summary_path.read_text(encoding="utf-8").strip()
+    return text or None
+
+
+def collect_structure_domain_placeholders(project_root: Path, summary_text: str | None = None) -> list[dict]:
+    """整理结构层可复用的功能域占位结果，供当前会话中的 Codex 继续判断。"""
+    return collect_architecture_domain_placeholders(project_root, summary_text=summary_text)
+
+
+def select_structure_drilldown_targets(domains: list[dict]) -> list[str]:
+    """从当前占位结果中挑出建议继续下钻的功能域顺序。"""
+    return select_architecture_domain_target_ids(domains)
 
 
 def git_ignore_enabled(project_root: Path) -> bool:
@@ -220,6 +250,7 @@ def write_structure_doc(
     domains: list[dict],
     max_depth: int,
     summary_confirmed_at: str | None = None,
+    summary_input_state: str | None = None,
 ) -> None:
     type_labels = {
         "directory": "目录",
@@ -240,7 +271,7 @@ def write_structure_doc(
         [
             (
                 f"- `{domain_lookup[target]['title']}`：当前主要落在 `{', '.join(domain_lookup[target]['paths'])}`。"
-                f" 候选依据：{'；'.join(domain_lookup[target].get('signal_basis', [])[:2])}"
+                f" 证据摘要：{'；'.join(domain_lookup[target].get('signal_basis', [])[:2])}"
             )
             for target in targets
             if target in domain_lookup
@@ -252,7 +283,7 @@ def write_structure_doc(
             for index, target in enumerate(targets, start=1)
             if target in domain_lookup
         ]
-    ) if targets else "1. 暂无推荐目标"
+    ) if targets else "1. 暂无建议下钻目标"
     domain_lookup = {domain["id"]: domain for domain in domains}
     first_layer_domains = [domain for domain in domains if domain.get("level") == 1]
     second_layer_domains = [domain for domain in domains if domain.get("level") == 2]
@@ -261,17 +292,17 @@ def write_structure_doc(
         [
             (
                 f"- `{domain['title']}`：{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
-                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+                f" 证据摘要：{'；'.join(domain.get('signal_basis', [])[:2])}"
             )
             for domain in first_layer_domains
         ]
-    ) if first_layer_domains else "- 尚未推断出稳定的第一层功能域"
+    ) if first_layer_domains else "- 当前还没有整理出可继续下钻的第一层功能域占位结果"
     second_layer_text = "\n".join(
         [
             (
                 f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下。"
                 f"{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
-                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+                f" 证据摘要：{'；'.join(domain.get('signal_basis', [])[:2])}"
             )
             for domain in second_layer_domains
         ]
@@ -281,13 +312,14 @@ def write_structure_doc(
             (
                 f"- `{domain['title']}`：挂在 `{domain_lookup.get(domain.get('parent_id'), {}).get('title', domain.get('parent_id'))}` 之下。"
                 f"{domain['summary']} 代码落点：`{', '.join(domain['paths'])}`。"
-                f" 候选依据：{'；'.join(domain.get('signal_basis', [])[:2])}"
+                f" 证据摘要：{'；'.join(domain.get('signal_basis', [])[:2])}"
             )
             for domain in third_layer_domains
         ]
     ) if third_layer_domains else "- 当前没有继续下沉的第三层专题域"
     stack_section = render_stack_section(project_root)
     summary_anchor = summary_confirmed_at or "待确认"
+    summary_input = summary_input_state or "missing"
     content = f"""# 项目结构
 
 ## 文档定位
@@ -303,7 +335,7 @@ def write_structure_doc(
 
 - 已有 summary 基线，需要进一步建立功能树与代码树映射
 - 需要确认某一功能域在代码里主要落在哪些路径和文件
-- 需要为 `modules/` 生成功能域文档提供结构中间层
+- 需要为当前会话中的 Codex 继续撰写 `modules/` 提供结构协议层
 
 ## 扫描元数据
 
@@ -311,6 +343,7 @@ def write_structure_doc(
 - 生成时间：`{utc_now()}`
 - 最大深度：`{max_depth}`
 - 当前基于的 summary 确认时间：`{summary_anchor}`
+- 当前结构协议是否接入 summary 正文：`{summary_input}`
 
 ## 技术栈与默认目录语义
 
@@ -352,7 +385,7 @@ def write_structure_doc(
 
 {reading_order}
 
-## 当前推荐继续下钻的功能域
+## 当前建议继续下钻的功能域
 
 {recommended}
 """
@@ -360,7 +393,7 @@ def write_structure_doc(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="扫描仓库并建立功能树与代码树映射文档。")
+    parser = argparse.ArgumentParser(description="扫描仓库，整理功能树到代码树映射所需证据，并写出结构文档。")
     parser.add_argument("--project-root", required=True, help="需要扫描的仓库根目录。")
     parser.add_argument("--doc-root", help="文档根目录。默认使用 <project-root>/project-docs。")
     parser.add_argument("--max-depth", type=int, default=2, help="目录树渲染的最大深度。")
@@ -378,10 +411,11 @@ def main() -> int:
         return 0
 
     mark_structure_drafted(index_payload)
+    summary_text = read_confirmed_summary_text(doc_root)
     tree_lines = build_tree(project_root, project_root, args.max_depth, args.include_hidden)
     top_level = summarize_top_level(project_root, args.include_hidden)
-    domains = infer_architecture_domains(project_root)
-    targets = recommended_domain_ids(domains)
+    domains = collect_structure_domain_placeholders(project_root, summary_text=summary_text)
+    targets = select_structure_drilldown_targets(domains)
     git_snapshot = capture_git_snapshot(project_root)
 
     write_structure_doc(
@@ -393,6 +427,7 @@ def main() -> int:
         domains,
         args.max_depth,
         summary_confirmed_at=index_payload.get("summary_state", {}).get("confirmed_at"),
+        summary_input_state="provided" if summary_text else "missing",
     )
 
     index_payload["last_scan_at"] = utc_now()
@@ -407,7 +442,7 @@ def main() -> int:
     index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     print(f"[完成] 已写入功能树与代码树映射文档：{doc_root / 'overview' / 'project-structure.md'}")
-    print(f"[完成] 推荐继续下钻的功能域：{', '.join(targets) if targets else '无'}")
+    print(f"[完成] 已整理可供当前会话中的 Codex 继续下钻的功能域：{', '.join(targets) if targets else '无'}")
     return 0
 
 

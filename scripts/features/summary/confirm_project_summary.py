@@ -9,9 +9,9 @@ import argparse
 import json
 from pathlib import Path
 
-from core.git_tracking import capture_git_snapshot, merge_git_state
-from core.workflow_state import ensure_workflow_state, mark_summary_confirmed
-from entrypoints.init_project_docs import normalize_doc_root
+from scripts.shared.git_tracking import capture_git_snapshot, merge_git_state
+from scripts.shared.workflow_state import ensure_workflow_state, mark_summary_confirmed
+from scripts.features.bootstrap.init_project_docs import normalize_doc_root
 
 
 SKILL_NAME = "auto-document"

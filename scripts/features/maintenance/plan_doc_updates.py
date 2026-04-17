@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-在代码变更后规划文档维护动作。
+在代码变更后整理文档维护建议。
+
+这条链路负责：
+
+- 基于 git 与变更路径整理范围快照
+- 生成可复用的证据摘要与判断提示
+- 把维护建议写回 index.json 与 history/change-log.md
+
+它不替代当前会话中的 Codex 做最终语义判断，只负责给出维护草案。
 """
 
 from __future__ import annotations
@@ -10,7 +18,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.git_tracking import (
+from scripts.shared.git_tracking import (
     assess_change_scope,
     capture_git_snapshot,
     describe_ref,
@@ -20,7 +28,7 @@ from core.git_tracking import (
     short_sha,
     working_tree_paths_from_status,
 )
-from core.workflow_state import (
+from scripts.shared.workflow_state import (
     ensure_workflow_state,
     mark_git_alignment_only,
     mark_hold,
@@ -149,7 +157,7 @@ def print_behind_notice(git_state: dict, git_snapshot: dict) -> None:
     print("[提示] 当前 checkout 早于文档基线。")
     print(f"       文档对齐点：{aligned_ref}")
     print(f"       当前代码：{current_ref}")
-    print("       为避免把文档回滚到旧状态，本次不会自动改写 project-docs。")
+    print("       为避免把文档回滚到旧状态，本次不会直接改写 project-docs。")
     print("       如果你只是临时查看旧代码，可以保持不动；如果要让文档改为对齐当前 checkout，请手动执行 reconcile_project_docs.py。")
 
 
@@ -358,7 +366,7 @@ def print_planned_entry(entry: dict) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="根据项目变更路径规划文档更新。")
+    parser = argparse.ArgumentParser(description="根据项目变更路径整理文档维护建议。")
     parser.add_argument("--project-root", required=True, help="仓库根目录。")
     parser.add_argument("--doc-root", help="文档根目录。默认使用 <project-root>/project-docs。")
     parser.add_argument("--changed", action="append", help="发生变化的项目相对路径。")
@@ -366,7 +374,7 @@ def main() -> int:
     parser.add_argument(
         "--git-sense",
         action="store_true",
-        help="对比 index.json 记录的对齐 commit 与当前 git HEAD，自动推导需要更新的文档。",
+        help="对比 index.json 记录的对齐 commit 与当前 git HEAD，整理本轮维护建议。",
     )
     args = parser.parse_args()
 
@@ -441,7 +449,7 @@ def main() -> int:
         index_payload["git_state"] = merge_git_state(index_payload.get("git_state", {}), git_snapshot, relation=index_payload.get("git_state", {}).get("last_relation"))
         index_path.write_text(json.dumps(index_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"[提示] {summary_gate_message(index_payload)}")
-        print("[提示] 在 summary 确认前，当前只记录 git 状态，不进入正式文档维护规划。")
+        print("[提示] 在 summary 确认前，当前只记录 git 状态，不进入正式文档维护建议。")
         return 0
 
     domain_coverage, domain_titles, domain_docs = build_domain_catalog(index_payload)
@@ -496,7 +504,7 @@ def main() -> int:
             scope_snapshot=build_scope_snapshot(scope),
         )
         append_change_log(doc_root / "history" / "change-log.md", [log_entry])
-        print("[完成] 本轮变化被判定为仅需 git 对齐，不改写正文。")
+        print("[完成] 本轮变化按当前维护规则收敛为仅需 git 对齐，不改写正文。")
         print(f"       原因：{reason}")
         return 0
     else:

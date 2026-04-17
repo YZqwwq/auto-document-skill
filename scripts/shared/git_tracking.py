@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-为 auto-document 提供 git 感知与对齐状态判断能力。
+为 auto-document 提供 git 感知、范围快照与维护建议整理能力。
+
+这份工具层负责：
+
+- 读取当前仓库的 git 状态
+- 整理变更路径与对齐关系
+- 输出供当前会话中的 Codex 使用的范围快照与维护建议
+
+它不负责替代 Codex 做最终的语义判断，只负责把 git 事实整理成
+后续可复用的结构化输入。
 """
 
 from __future__ import annotations
@@ -9,7 +18,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.path_intelligence import is_low_semantic_risk_path, is_root_context_signal_path
+from scripts.shared.path_intelligence import is_low_semantic_risk_path, is_root_context_signal_path
 
 RECONCILE_CHANGE_COUNT_THRESHOLD = 20
 RECONCILE_MODULE_COUNT_THRESHOLD = 3
@@ -250,13 +259,19 @@ def classify_impacted_units(changed_paths: list[str], tracked_units: dict) -> tu
     return sorted(impacted_units), uncovered_paths
 
 
-def assess_change_scope(
+def build_change_scope_report(
     changed_paths: list[str],
     tracked_units: dict,
     tracked_paths: list[str],
     *,
     relation: str | None = None,
 ) -> dict:
+    """
+    基于变化路径与已登记映射，整理一份维护范围报告。
+
+    输出中的 `recommended_*` 字段表示“当前脚本整理出的维护建议”，
+    供当前会话中的 Codex 继续判断，并不代表脚本已经完成最终拍板。
+    """
     normalized = unique_paths(changed_paths)
     top_level_paths = sorted({path.split("/", 1)[0] for path in normalized if path})
     tracked_top_levels = {item.replace("\\", "/").strip("/") for item in tracked_paths}
@@ -372,6 +387,22 @@ def assess_change_scope(
     }
 
 
+def assess_change_scope(
+    changed_paths: list[str],
+    tracked_units: dict,
+    tracked_paths: list[str],
+    *,
+    relation: str | None = None,
+) -> dict:
+    """兼容旧调用名，实际返回维护范围报告。"""
+    return build_change_scope_report(
+        changed_paths,
+        tracked_units,
+        tracked_paths,
+        relation=relation,
+    )
+
+
 def format_scope_summary(scope: dict) -> str:
     parts = [
         f"变化文件 {scope.get('changed_paths_count', 0)} 个",
@@ -386,6 +417,11 @@ def format_scope_summary(scope: dict) -> str:
 
 
 def explain_alignment(project_root: Path, recorded_head: str | None, snapshot: dict) -> tuple[str, list[str], str, str | None]:
+    """
+    解释当前 checkout 与文档对齐点的关系，并给出变更路径输入。
+
+    返回值用于后续维护建议整理，不应被理解为已经完成正文更新决策。
+    """
     if not snapshot.get("git_available"):
         return "no_git", [], "当前项目未检测到可用的 git 工作区。", None
 

@@ -1,6 +1,6 @@
 ---
 name: auto-document
-description: "面向主分支或即将合并到主分支环境的仓库文档工作流 skill。先由人校准项目级 summary，再按功能树而不是目录树建立文档，并在用户触发时结合 git 变化谨慎维护。"
+description: "面向主分支或即将合并到主分支环境的仓库文档工作流 skill。先由人校准项目级 summary，再由当前会话中的 Codex 按功能树而不是目录树手动推断并维护文档，脚本只负责准备证据、协议与状态。"
 ---
 
 # 自动文档
@@ -9,8 +9,10 @@ description: "面向主分支或即将合并到主分支环境的仓库文档工
 这个 skill 不是“扫描代码后直接批量生成文档”的通用工具，而是一个带工作流约束的仓库文档协作系统：
 
 - 先由人校准项目当前状态与未来方向
-- 再由 AI 按功能树而不是目录树建立文档
+- 再由当前会话中的 Codex 按功能树而不是目录树手动推断并建立文档
 - 在用户再次触发时，结合 git 变化对最小受影响功能模块进行谨慎维护
+
+这里的脚本职责是准备证据包、推断协议、占位结构和状态记录，不负责在脚本内部自动完成语义判断。
 
 ## 适用前提
 
@@ -31,11 +33,12 @@ description: "面向主分支或即将合并到主分支环境的仓库文档工
 
 - 代码是当前实现真相
 - 用户调整后的 `project-summary.md` 是项目意图基线
-- AI 可以协助判断用户是否已经完成确认，但不能跳过人工校准这个过程
+- 当前会话中的 Codex 可以协助判断用户是否已经完成确认，但不能跳过人工校准这个过程
 - 功能树是真正的文档主骨架，代码树只是功能树在代码中的映射
 - 文档应按功能拆解，而不是按目录自动拆解
 - git 只负责判断文档与代码是否对齐，不负责替代人类确认项目方向
 - 如果代码变化没有改变文档语义，就不应为了“代码变了”而强行重写文档
+- 脚本只负责整理事实、生成协议和维护状态；功能域判断、summary 理解和维护层级判断由当前会话中的 Codex 完成
 
 ## 默认目录结构
 
@@ -81,7 +84,7 @@ project-docs/
 使用：
 
 ```bash
-python scripts/init_project_docs.py --project-root <repo-root>
+python -m scripts.features.bootstrap.init_project_docs --project-root <repo-root>
 ```
 
 重要规则：
@@ -96,21 +99,21 @@ python scripts/init_project_docs.py --project-root <repo-root>
 目标：
 
 - 基于当前代码、README 和关键入口文件，生成一份项目级 summary 草案
-- 把 AI 对项目当前状态的理解先写出来
+- 把当前会话中的 Codex 对项目当前状态的理解先写出来
 - 明确哪些内容需要用户补充、修正和校准
 - 让用户补上项目未来方向、设计理念和架构意图
 
 使用：
 
 ```bash
-python scripts/draft_project_summary.py --project-root <repo-root>
+python -m scripts.features.summary.draft_project_summary --project-root <repo-root>
 ```
 
 重要规则：
 
-- 这一阶段的 AI 目标不是定义项目最终真相，而是提供一份待用户校准的理解草案
+- 这一阶段的目标不是让脚本自动定义项目最终真相，而是由当前会话中的 Codex 提供一份待用户校准的理解草案
 - summary 写完后应立即停下，不继续生成正式功能树和模块文档
-- 用户可以直接修改 `project-summary.md`，也可以通过对话要求 AI 修订
+- 用户可以直接修改 `project-summary.md`，也可以通过对话要求 Codex 修订
 
 ### 3. 第二阶段：确认 summary 已可作为基线
 
@@ -119,18 +122,18 @@ python scripts/draft_project_summary.py --project-root <repo-root>
 使用：
 
 ```bash
-python scripts/confirm_project_summary.py --project-root <repo-root>
+python -m scripts.features.summary.confirm_project_summary --project-root <repo-root>
 ```
 
 确认语义：
 
 - 用户直接修改了 `project-summary.md`
 - 用户明确表示这份 summary 可以作为后续基线
-- 用户要求继续进入下一阶段，且上下文已足以让 AI 判断 summary 已被接受
+- 用户要求继续进入下一阶段，且上下文已足以让当前会话中的 Codex 判断 summary 已被接受
 
 重要规则：
 
-- 这里是“人工校准 + AI 协助判断”的确认语义，而不是严格审批流
+- 这里是“人工校准 + Codex 协助判断”的确认语义，而不是严格审批流
 - 当 `summary_state.status != confirmed` 时，不进入正式功能树建立，也不生成正式 `modules/`
 
 ### 4. 第三阶段：建立功能树与代码树映射
@@ -139,7 +142,7 @@ python scripts/confirm_project_summary.py --project-root <repo-root>
 
 目标：
 
-- 先识别项目的主要功能域
+- 先由脚本整理全仓证据、推断协议和占位结构，再由当前会话中的 Codex 识别项目的主要功能域
 - 再按功能而不是按目录进行树级拆解
 - 把这棵功能树逐层向下拆，直到落到已经不需要继续依赖下级功能解释的最小功能单元
 - 为这棵功能树建立对应的代码树映射关系
@@ -147,7 +150,7 @@ python scripts/confirm_project_summary.py --project-root <repo-root>
 使用：
 
 ```bash
-python scripts/scan_project_tree.py --project-root <repo-root>
+python -m scripts.features.structure.scan_project_tree --project-root <repo-root>
 ```
 
 重要规则：
@@ -155,6 +158,7 @@ python scripts/scan_project_tree.py --project-root <repo-root>
 - `project-structure.md` 的核心职责不是单纯解释技术栈目录语义，而是作为“功能树到代码树”的映射工具
 - 功能树的最小粒度是最小功能单元，不是文件
 - 代码树的最小粒度才是文件
+- 脚本可以准备功能域推断协议和占位结果，但不应把占位结构写成“脚本已经完成语义判断”
 - 如果顶层功能边界变化很大，优先重建功能树与代码树映射，再考虑下级模块文档
 
 ### 5. 第四阶段：生成功能域文档
@@ -173,7 +177,7 @@ python scripts/scan_project_tree.py --project-root <repo-root>
 使用：
 
 ```bash
-python scripts/create_module_doc.py --project-root <repo-root> --target <domain-id-or-path>
+python -m scripts.features.module_docs.create_module_doc --project-root <repo-root> --target <domain-id-or-path>
 ```
 
 重要规则：
@@ -192,7 +196,7 @@ python scripts/create_module_doc.py --project-root <repo-root> --target <domain-
 使用：
 
 ```bash
-python scripts/plan_doc_updates.py --project-root <repo-root>
+python -m scripts.features.maintenance.plan_doc_updates --project-root <repo-root>
 ```
 
 这个模式会：
@@ -218,7 +222,7 @@ python scripts/plan_doc_updates.py --project-root <repo-root>
 使用：
 
 ```bash
-python scripts/reconcile_project_docs.py --project-root <repo-root>
+python -m scripts.features.maintenance.reconcile_project_docs --project-root <repo-root>
 ```
 
 推荐流程：
@@ -294,13 +298,13 @@ python scripts/reconcile_project_docs.py --project-root <repo-root>
 - `confirm_project_summary.py`
   把已被用户接受的 summary 正式登记为后续功能树和模块文档的认知基线。
 - `scan_project_tree.py`
-  在 summary 已确认后建立功能树与代码树映射。
+  在 summary 已确认后准备功能树与代码树映射所需的证据、协议和占位结构。
 - `create_module_doc.py`
-  基于 summary 与功能树生成功能域文档。
+  基于已确认 summary、功能域结果和证据上下文生成功能域文档。
 - `plan_doc_updates.py`
-  在用户触发时，利用 git 感知规划最小受影响功能模块的文档更新。
+  在用户触发时，利用 git 感知与证据摘要规划最小受影响功能模块的文档更新。
 - `reconcile_project_docs.py`
-  在大范围变化后重建功能树、代码映射与相关模块文档，并同步索引状态。
+  在大范围变化后重建证据协议、功能映射与相关模块文档，并同步索引状态。
 
 ### `references/`
 
@@ -314,4 +318,5 @@ python scripts/reconcile_project_docs.py --project-root <repo-root>
   `index.json` 的字段定义与状态机说明。
 - `update-workflow.md`
   日常维护与收敛时的更新规则。
-
+- `codex-skill-boundary.md`
+  明确这是 Codex 专用 skill，不承担脚本内 AI 调用。

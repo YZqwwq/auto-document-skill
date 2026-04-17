@@ -66,11 +66,11 @@
 - `summary_confirmed`
   summary 已被视为后续功能树分析基线，但功能树与代码树映射尚未建立。
 - `structure_draft`
-  AI 正在建立功能树与代码树映射。
+  脚本已经准备好功能树与代码树映射所需的证据与协议，等待当前会话中的 Codex 完成判断。
 - `structure_aligned`
-  功能树与代码树映射已建立并与当前 summary 对齐。
+  功能树与代码树映射已由当前会话中的 Codex 建立，并与当前 summary 对齐。
 - `modules_draft`
-  AI 正在生成功能域文档。
+  脚本已经准备好模块文档所需的证据上下文，等待当前会话中的 Codex 完成文档生成。
 - `maintenance`
   已进入人工触发的维护模式。
 - `hold`
@@ -89,7 +89,7 @@
 {
   "status": "pending_review",
   "doc_path": "overview/project-summary.md",
-  "source": "ai_draft",
+  "source": "codex_session_draft",
   "draft_generated_at": "2026-04-14T10:00:00Z",
   "confirmed_by": null,
   "confirmed_at": null,
@@ -108,7 +108,7 @@
   可选值：
   `missing`、`drafted`、`pending_review`、`confirmed`、`stale`
 - `source`
-  当前版本来源，例如 `ai_draft`、`user_rewrite`、`legacy_generated`
+  当前版本来源，例如 `codex_session_draft`、`user_rewrite`、`legacy_generated`
 - `draft_generated_at`
   最近一次写出 summary 草案的时间
 - `confirmed_by`
@@ -117,7 +117,7 @@
   最近一次确认时间
 - `confirmation_mode`
   推荐值：
-  `human_explicit`、`ai_assisted`、`legacy`
+  `human_explicit`、`codex_assisted`、`legacy`
 - `baseline_branch`
   summary 成为基线时所处的分支
 - `baseline_head_sha`
@@ -132,7 +132,7 @@
 重要语义：
 
 - `confirmed` 不必强绑定到某个显式命令
-- 只要用户已对 summary 做出足够校准，AI 就可以把它视为可继续的基线
+- 只要用户已对 summary 做出足够校准，当前会话中的 Codex 就可以把它视为可继续的基线
 
 ## `structure_state` 推荐结构
 
@@ -253,7 +253,7 @@
 - `generated_docs`
   当前已写出的文档路径集合。
 - `architecture_domains`
-  当前推断出的功能域及其层级信息。
+  当前功能域结果及其层级信息。它可以来自 Codex 的正式判断结果，也可以来自脚本为兼容链路保留的占位结构。
 - `module_docs`
   `功能域 ID -> 模块文档路径` 的映射。兼容旧数据时，也可能仍存在少量 `路径 -> 文档路径` 记录。
 - `domain_analysis`
@@ -400,10 +400,11 @@
 - 每次把 summary 视为可继续基线后：
   - 把 `summary_state.status` 设为 `confirmed`
   - 记录 `confirmed_at`、`baseline_branch`、`baseline_head_sha`
-  - 把 `confirmation_mode` 设为 `human_explicit` 或 `ai_assisted`
+  - 把 `confirmation_mode` 设为 `human_explicit` 或 `codex_assisted`
 - 每次建立功能树与代码树映射后：
   - 更新 `structure_state`
   - 视需要刷新分析缓存字段，例如 `architecture_domains`、`tracked_paths`
+  - 如果当前仅写入了脚本生成的占位结构，应明确知道这仍不是最终语义判断
 - 每次生成功能域文档后：
   - 更新 `module_state`
   - 视需要刷新分析缓存字段，例如 `module_docs`、`generated_docs`

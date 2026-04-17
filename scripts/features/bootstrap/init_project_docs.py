@@ -10,8 +10,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.git_tracking import capture_git_snapshot, merge_git_state
-from core.workflow_state import default_module_state, default_structure_state, default_summary_state
+from scripts.shared.git_tracking import capture_git_snapshot, merge_git_state
+from scripts.shared.workflow_state import default_module_state, default_structure_state, default_summary_state
 
 
 SKILL_NAME = "auto-document"

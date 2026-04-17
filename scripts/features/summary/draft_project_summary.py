@@ -10,8 +10,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.git_tracking import capture_git_snapshot, merge_git_state
-from core.path_intelligence import (
+from scripts.shared.git_tracking import capture_git_snapshot, merge_git_state
+from scripts.shared.path_intelligence import (
     DEFAULT_OMIT_DIR_NAMES,
     build_path_evidence,
     collect_readme_summary,
@@ -21,9 +21,9 @@ from core.path_intelligence import (
     score_root_entry,
     summarize_path,
 )
-from core.workflow_state import ensure_workflow_state, mark_summary_drafted
-from entrypoints.init_project_docs import normalize_doc_root
-from generation.create_module_doc import detect_project_traits
+from scripts.shared.workflow_state import ensure_workflow_state, mark_summary_drafted
+from scripts.features.bootstrap.init_project_docs import normalize_doc_root
+from scripts.features.module_docs.create_module_doc import detect_project_traits
 
 
 SKILL_NAME = "auto-document"

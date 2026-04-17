@@ -9,6 +9,7 @@
 - skill 只在用户要求使用时触发，不做后台自动巡检
 - git 负责判断正文是否可能落后于代码，不负责替代人类确认项目意图
 - 如果变化没有使文档语义失效，可以只更新 git 基线而不改正文
+- 脚本负责整理 git 证据、范围摘要和判断提示，真正的维护判断由当前会话中的 Codex 完成
 
 ## 两类基线
 
@@ -138,8 +139,8 @@
 ### 先建立 summary 基线
 
 ```bash
-python scripts/draft_project_summary.py --project-root <repo-root>
-python scripts/confirm_project_summary.py --project-root <repo-root>
+python -m scripts.features.summary.draft_project_summary --project-root <repo-root>
+python -m scripts.features.summary.confirm_project_summary --project-root <repo-root>
 ```
 
 说明：
@@ -150,18 +151,17 @@ python scripts/confirm_project_summary.py --project-root <repo-root>
 ### 再建立功能树映射与模块基线
 
 ```bash
-python scripts/scan_project_tree.py --project-root <repo-root>
-python scripts/reconcile_project_docs.py --project-root <repo-root>
+python -m scripts.features.structure.scan_project_tree --project-root <repo-root>
+python -m scripts.features.maintenance.reconcile_project_docs --project-root <repo-root>
 ```
 
 ### 日常维护判断
 
 ```bash
-python scripts/plan_doc_updates.py --project-root <repo-root>
+python -m scripts.features.maintenance.plan_doc_updates --project-root <repo-root>
 ```
 
 如果当前 checkout 早于文档基线，脚本应默认保持文档不动。  
 如果当前分支与文档基线分叉，脚本应输出“建议局部更新”、“建议收敛”或“建议用户复核”。  
 如果变化已经波及项目级定位，脚本应要求重新校准 summary。  
 如果变化没有使正文语义失效，脚本应允许只更新 git 基线。
-
