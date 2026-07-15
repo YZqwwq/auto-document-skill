@@ -1,4 +1,4 @@
 interface:
   display_name: "自动文档"
-  short_description: "先确认项目 summary，再建立结构责任树与模块文档"
-  default_prompt: "使用 $auto-document 初始化项目文档。先生成并确认项目级 summary，再建立 project-structure 的结构责任树，最后生成 modules，并在代码变更后利用 git 感知维护受影响文档。"
+  short_description: "初始化轻量项目文档工作区，并按确认后的功能模块逐步记录文档"
+  default_prompt: "使用 $auto-document 初始化项目文档。先请求用户用不超过 200 字说明项目用途，只创建 index.md、project-description.md 和空的 document 文件夹；之后浅层阅读项目，提出大功能模块并请求用户确认，再按确认后的功能模块逐步深入阅读。阅读进度集中用白话写在 index.md，catalog.md 只列子功能模块。"
